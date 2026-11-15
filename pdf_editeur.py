@@ -16,6 +16,7 @@ from tkinter import colorchooser, filedialog, messagebox, simpledialog, ttk
 
 import pymupdf
 
+import conversion
 import pdftool
 import polices
 import scan
@@ -76,7 +77,7 @@ _ICONES = {
     "edition": ("\ue70f", "✎"), "texte": ("\ue8d2", "T"), "image": ("\ue91b", "▣"),
     "signature": ("\uee56", "✍"), "surligner": ("\ue7e6", "▌"), "commentaire": ("\ue90a", "✉"),
     "rechercher": ("\ue721", "⌕"), "pivoter": ("\ue7ad", "⟳"), "page": ("\ue7c3", "✚"),
-    "supprimer": ("\ue74d", "✖"),
+    "supprimer": ("\ue74d", "✖"), "formulaire": ("\ue73a", "☑"),
 }
 ICONES = {k: (v[0] if POLICE_ICONES else v[1]) for k, v in _ICONES.items()}
 
@@ -347,6 +348,7 @@ class Editeur(Base):
         m.add_command(label="Ajouter un PDF à la fin (fusionner)…", command=self.fusionner)
         m.add_command(label="Exporter des pages en PDF…", command=self.exporter_pages)
         m.add_command(label="Exporter en images (PNG)…", command=self.exporter_images)
+        m.add_command(label="Exporter en Word (.docx)…", command=self.exporter_word)
         m.add_command(label="Exporter le texte…", command=self.exporter_texte)
         m.add_separator()
         m.add_command(label="Imprimer…", accelerator="Ctrl+P", command=self.imprimer)
@@ -367,6 +369,10 @@ class Editeur(Base):
         m.add_command(label="Surligner", command=lambda: self.outil.set("surligner"))
         m.add_command(label="Ajouter un commentaire", command=lambda: self.outil.set("commentaire"))
         m.add_command(label="Effacer une zone (caviarder)", command=lambda: self.outil.set("caviarder"))
+        m.add_separator()
+        m.add_command(label="Remplir le formulaire", command=lambda: self.outil.set("formulaire"))
+        m.add_command(label="Créer un champ de formulaire", command=lambda: self.outil.set("champ"))
+        m.add_command(label="Aplatir le formulaire et les annotations", command=self.aplatir)
         m.add_separator()
         m.add_command(label="Rechercher et remplacer", accelerator="Ctrl+F", command=self.afficher_recherche)
         m.add_command(label="Filigrane…", command=self.filigrane)
@@ -430,11 +436,12 @@ class Editeur(Base):
         bouton("signature", "Signer", self.choisir_signature, "signature")
         bouton("surligner", "Surligner", lambda: self.outil.set("surligner"), "surligner")
         bouton("commentaire", "Note", lambda: self.outil.set("commentaire"), "commentaire")
+        bouton("formulaire", "Formulaire", lambda: self.outil.set("formulaire"), "formulaire")
         sep()
         bouton("rechercher", "Rechercher", self.afficher_recherche)
         sep()
         bouton("pivoter", "Pivoter", lambda: self.pivoter(90))
-        bouton("page", "Insérer page", self.inserer_page_blanche)
+        bouton("page", "Ins. page", self.inserer_page_blanche)
         bouton("supprimer", "Suppr. page", self.supprimer_page)
         self.outil.trace_add("write", lambda *_: self._changement_outil())
         self._marquer_outil()
@@ -502,13 +509,12 @@ class Editeur(Base):
 
         # Bandeau pour les documents scannés
         self.bandeau = tk.Frame(self, bg="#fff4ce", padx=10, pady=6)
-        tk.Label(self.bandeau, text="Ce document est scanné : son texte est une image. Lancez la reconnaissance "
-                 "de texte pour pouvoir le modifier, le rechercher et le copier.", bg="#fff4ce",
-                 anchor="w", justify="left").pack(side="left", fill="x", expand=True)
+        self.bandeau_texte = tk.Label(self.bandeau, text="", bg="#fff4ce", anchor="w", justify="left")
+        self.bandeau_texte.pack(side="left", fill="x", expand=True)
         tk.Button(self.bandeau, text="✕", relief="flat", bg="#fff4ce", bd=0,
                   command=lambda: self.bandeau.pack_forget()).pack(side="right", padx=(8, 0))
-        ttk.Button(self.bandeau, text="Reconnaître le texte (OCR)", style="Accent.TButton",
-                   command=self.lancer_ocr).pack(side="right")
+        self.bandeau_bouton = ttk.Button(self.bandeau, text="", style="Accent.TButton")
+        self.bandeau_bouton.pack(side="right")
 
         self.panneaux = ttk.PanedWindow(self, orient="horizontal")
         self.panneaux.pack(fill="both", expand=True)
@@ -675,7 +681,8 @@ class Editeur(Base):
             text=f"⚠ {len(manquantes)} police(s) à installer" if manquantes else "")
 
     def _maj_etat(self):
-        nom = os.path.basename(self.chemin) if self.chemin else None
+        nom = os.path.basename(self.chemin) if self.chemin else (
+            os.path.basename(self.nom_suggere) if self.doc and getattr(self, "nom_suggere", None) else None)
         self.title((("● " if self.modifie else "") + nom + " — PDF Éditeur") if nom else "PDF Éditeur")
         n = self.doc.page_count if self.doc else 0
         self.var_page.set(str(self.page_idx + 1) if n else "")
@@ -690,19 +697,32 @@ class Editeur(Base):
         if not self._confirmer_abandon():
             return
         initial = os.path.dirname(self.reglages["recents"][0]) if self.reglages["recents"] else None
-        chemin = filedialog.askopenfilename(title="Ouvrir un PDF", initialdir=initial,
-                                            filetypes=[("Documents PDF", "*.pdf"), ("Tous les fichiers", "*.*")])
-        if chemin:
-            self.ouvrir(chemin)
+        chemins = filedialog.askopenfilenames(title="Ouvrir", initialdir=initial, filetypes=[
+            ("Documents (PDF, Word, images)",
+             "*.pdf *.docx *.doc *.rtf *.odt *.txt *.png *.jpg *.jpeg *.tif *.tiff *.bmp *.gif *.webp"),
+            ("Documents PDF", "*.pdf"), ("Documents Word", "*.docx *.doc *.rtf *.odt"),
+            ("Images", "*.png *.jpg *.jpeg *.tif *.tiff *.bmp *.gif *.webp"), ("Tous les fichiers", "*.*")])
+        if chemins:
+            self._ouvrir_fichiers(list(chemins))
+
+    def _ouvrir_fichiers(self, chemins):
+        """Ouvre un PDF, un document Word, ou une ou plusieurs images (réunies en un PDF)."""
+        images = [c for c in chemins if conversion.type_fichier(c) == "image"]
+        if len(images) > 1 or (images and len(chemins) == 1):
+            return self.ouvrir(images[0], images=images)
+        self.ouvrir(chemins[0])
 
     def _deposer(self, e):
-        fichiers = [f for f in self.tk.splitlist(e.data) if f.lower().endswith(".pdf")]
+        tous = [f for f in self.tk.splitlist(e.data) if conversion.type_fichier(f)]
+        fichiers = [f for f in tous if conversion.type_fichier(f) == "pdf"]
         if not fichiers:
-            images = [f for f in self.tk.splitlist(e.data)
-                      if f.lower().endswith((".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif", ".tiff"))]
+            images = [f for f in tous if conversion.type_fichier(f) == "image"]
             if images and self.doc:
                 self.image_a_placer = images[0]
                 self.outil.set("image")
+                return
+            if tous and self._confirmer_abandon():
+                self._ouvrir_fichiers(tous)
             return
         if self.doc:
             rep = messagebox.askyesnocancel(
@@ -716,15 +736,27 @@ class Editeur(Base):
                 return
         self.ouvrir(fichiers[0])
 
-    def ouvrir(self, chemin):
+    def ouvrir(self, chemin, images=None):
         self._fermer_edition(valider=True)
+        genre = conversion.type_fichier(chemin) or "pdf"
+        self.config(cursor="watch")
+        self.statut(f"Ouverture de {os.path.basename(chemin)}…" + (" (conversion en PDF)" if genre != "pdf" else ""))
+        self.update()
         try:
-            with open(chemin, "rb") as f:
-                donnees = f.read()
-            doc = pymupdf.open(stream=donnees, filetype="pdf")
+            if genre == "image":
+                doc = pymupdf.open(stream=conversion.images_vers_pdf(images or [chemin]).tobytes(), filetype="pdf")
+            elif genre == "word":
+                doc = pymupdf.open(stream=conversion.word_vers_pdf(chemin), filetype="pdf")
+            else:
+                with open(chemin, "rb") as f:
+                    donnees = f.read()
+                doc = pymupdf.open(stream=donnees, filetype="pdf")
         except Exception as e:
+            self.config(cursor="")
             messagebox.showerror("Ouverture impossible", f"{chemin}\n\n{e}")
             return
+        finally:
+            self.config(cursor="")
         if doc.needs_pass:
             while True:
                 mdp = simpledialog.askstring("Document protégé", f"{os.path.basename(chemin)} est protégé.\n"
@@ -737,15 +769,21 @@ class Editeur(Base):
             doc = pymupdf.open(stream=doc.tobytes(encryption=pymupdf.PDF_ENCRYPT_NONE), filetype="pdf")
             messagebox.showinfo("Document protégé", "Le document est déverrouillé pour être modifié.\n"
                                 "Utilisez « Fichier › Enregistrer avec mot de passe » pour le protéger à nouveau.")
-        self.doc, self.chemin = doc, os.path.abspath(chemin)
         self.historique.clear()
         self.retablir.clear()
-        self.modifie = False
         self.page_idx = 0
         self.resultats_recherche = []
-        recents = [self.chemin] + [r for r in self.reglages["recents"] if r != self.chemin]
-        self.reglages["recents"] = recents[:12]
-        self._sauver_reglages()
+        if genre == "pdf":
+            self.doc, self.chemin, self.modifie = doc, os.path.abspath(chemin), False
+            self.nom_suggere = None
+            recents = [self.chemin] + [r for r in self.reglages["recents"] if r != self.chemin]
+            self.reglages["recents"] = recents[:12]
+            self._sauver_reglages()
+        else:
+            # document converti : pas encore de fichier PDF, « Enregistrer » demandera où le mettre
+            self.doc, self.chemin, self.modifie = doc, None, True
+            self.nom_suggere = os.path.join(os.path.dirname(os.path.abspath(chemin)),
+                                            os.path.splitext(os.path.basename(chemin))[0] + ".pdf")
         self.accueil.place_forget()
         self.statut(f"{os.path.basename(chemin)} : {doc.page_count} page(s).")
         self.update_idletasks()
@@ -756,6 +794,13 @@ class Editeur(Base):
 
     def _maj_bandeau(self):
         if self.doc and scan.pages_a_reconnaitre(self.doc):
+            self.bandeau_texte.config(text="Ce document est scanné : son texte est une image. Lancez la "
+                                      "reconnaissance de texte pour pouvoir le modifier, le rechercher et le copier.")
+            self.bandeau_bouton.config(text="Reconnaître le texte (OCR)", command=self.lancer_ocr)
+            self.bandeau.pack(side="top", fill="x", before=self.panneaux)
+        elif self.doc and self.outil.get() != "formulaire" and any(p.first_widget for p in self.doc):
+            self.bandeau_texte.config(text="Ce document contient un formulaire à remplir.")
+            self.bandeau_bouton.config(text="Remplir le formulaire", command=lambda: self.outil.set("formulaire"))
             self.bandeau.pack(side="top", fill="x", before=self.panneaux)
         else:
             self.bandeau.pack_forget()
@@ -787,10 +832,11 @@ class Editeur(Base):
         if not self.doc:
             return False
         self._fermer_edition(valider=True)
-        base = os.path.splitext(os.path.basename(self.chemin or "document.pdf"))[0]
+        reference = self.chemin or getattr(self, "nom_suggere", None) or "document.pdf"
+        base = os.path.splitext(os.path.basename(reference))[0]
         chemin = filedialog.asksaveasfilename(
             title="Enregistrer sous", defaultextension=".pdf", initialfile=base + ".pdf",
-            initialdir=os.path.dirname(self.chemin) if self.chemin else None,
+            initialdir=os.path.dirname(reference) or None,
             filetypes=[("Document PDF", "*.pdf")])
         if not chemin:
             return False
@@ -1147,6 +1193,7 @@ class Editeur(Base):
         self._dessiner_resultats()
         if self.outil.get() == "edition":
             self._dessiner_contours()
+        self._dessiner_champs()
         self._selection_vignette()
 
     def _placer(self):
@@ -1359,7 +1406,7 @@ class Editeur(Base):
         o = self.outil.get()
         curseurs = {"selection": "xterm", "edition": "xterm", "texte": "crosshair", "image": "crosshair",
                     "signature": "crosshair", "surligner": "xterm", "commentaire": "crosshair",
-                    "caviarder": "crosshair"}
+                    "caviarder": "crosshair", "formulaire": "hand2", "champ": "crosshair"}
         self.canvas.config(cursor=curseurs.get(o, ""))
         if o in ("edition", "texte"):
             self.barre_format.pack(side="top", fill="x", after=self.ruban)
@@ -1368,6 +1415,10 @@ class Editeur(Base):
         self.canvas.delete("contour")
         if o == "edition" and self.doc:
             self._dessiner_contours()
+        if self.doc:
+            self._dessiner_champs()
+            if o == "formulaire":
+                self.bandeau.pack_forget()
         aides = {
             "selection": "Cliquez sur un mot pour voir sa police. Double-cliquez pour le modifier.",
             "edition": "Cliquez sur un texte pour le modifier. Entrée pour valider, Échap pour annuler.",
@@ -1377,6 +1428,8 @@ class Editeur(Base):
             "surligner": "Glissez sur le texte à surligner.",
             "commentaire": "Cliquez sur la page pour ajouter un commentaire.",
             "caviarder": "Tracez un rectangle : tout son contenu sera définitivement effacé.",
+            "formulaire": "Cliquez sur un champ pour le remplir. Tab passe au champ suivant.",
+            "champ": "Tracez un rectangle pour créer un champ de formulaire.",
         }
         self.statut(aides.get(o, ""))
 
@@ -1389,6 +1442,11 @@ class Editeur(Base):
             self.canvas.delete("selection")
 
     def _survol(self, e):
+        if self.doc and self.outil.get() in ("selection", "formulaire"):
+            sur_champ = self._champ_a(self._vers_page(e.x, e.y)) is not None
+            defaut = "xterm" if self.outil.get() == "selection" else "arrow"
+            self.canvas.config(cursor="hand2" if sur_champ else defaut)
+            return
         if not self.doc or self.outil.get() != "edition":
             return
         p = self._vers_page(e.x, e.y)
@@ -1401,6 +1459,13 @@ class Editeur(Base):
         o = self.outil.get()
         p = self._vers_page(e.x, e.y)
         self.glisser = (e.x, e.y)
+        if self.edition and self.edition.get("type") == "champ":
+            self._fermer_edition(valider=True)
+        champ = self._champ_a(p) if o in ("selection", "formulaire") else None
+        if champ:
+            self.glisser = None
+            self._fermer_edition(valider=True)
+            return self._remplir_champ(champ)
         if o == "edition" and not self.spans and scan.est_scannee(self.doc[self.page_idx]):
             if messagebox.askyesno("Page scannée", "Cette page est une image scannée : son texte doit d'abord "
                                    "être reconnu (OCR) pour être modifié.\n\nLancer la reconnaissance maintenant ?"):
@@ -1429,7 +1494,7 @@ class Editeur(Base):
         o = self.outil.get()
         if o in ("selection", "surligner"):
             self._selectionner(self._vers_page(*self.glisser), self._vers_page(e.x, e.y))
-        elif o in ("image", "signature", "caviarder"):
+        elif o in ("image", "signature", "caviarder", "champ"):
             self.canvas.delete("cadre")
             x0, y0 = self.canvas.canvasx(self.glisser[0]), self.canvas.canvasy(self.glisser[1])
             x1, y1 = self.canvas.canvasx(e.x), self.canvas.canvasy(e.y)
@@ -1446,12 +1511,12 @@ class Editeur(Base):
             self._infos_selection()
         elif o == "surligner" and self.selection:
             self._surligner()
-        elif o in ("image", "signature", "caviarder"):
+        elif o in ("image", "signature", "caviarder", "champ"):
             self.canvas.delete("cadre")
             if abs(e.x - debut[0]) < 8 or abs(e.y - debut[1]) < 8:
                 return self.statut("Tracez un rectangle plus grand (cliquez et faites glisser).")
             {"image": self._placer_image, "signature": self._placer_signature,
-             "caviarder": self._caviarder}[o](debut, (e.x, e.y))
+             "caviarder": self._caviarder, "champ": self._creer_champ}[o](debut, (e.x, e.y))
 
     def _double_clic(self, e):
         if self.doc and self.outil.get() == "selection":
@@ -1618,6 +1683,15 @@ class Editeur(Base):
         return style
 
     def _fermer_edition(self, valider=True):
+        if self.edition and self.edition.get("type") == "champ":
+            if valider:
+                self.edition["valider"]()
+                return
+            ed, self.edition = self.edition, None
+            for item in ed["items"]:
+                self.canvas.delete(item)
+            ed["entree"].destroy()
+            return
         ed, self.edition = self.edition, None
         if not ed:
             return
@@ -1785,6 +1859,203 @@ class Editeur(Base):
         page.apply_redactions()
         self._apres_modif()
         self.statut("Zone effacée.")
+
+    # ========================================================== Formulaires ==
+
+    def _champs(self):
+        if not self.doc:
+            return []
+        # garder la page en vie : un champ ne peut être modifié que si sa page existe encore
+        self._page_champs = self.doc[self.page_idx]
+        return list(self._page_champs.widgets())
+
+    def _champ_a(self, p):
+        for w in self._champs():
+            if w.rect.contains(p):
+                return w
+        return None
+
+    def _dessiner_champs(self):
+        self.canvas.delete("champ")
+        if not self.doc or self.outil.get() not in ("formulaire", "champ"):
+            return
+        for w in self._champs():
+            x0, y0, x1, y1 = self._vers_canvas(w.rect)
+            self.canvas.create_rectangle(x0, y0, x1, y1, outline=BLEU, fill="#cfe3fb", stipple="gray25",
+                                         width=1, tags="champ")
+
+    def _remplir_champ(self, w):
+        t = w.field_type
+        if t == pymupdf.PDF_WIDGET_TYPE_CHECKBOX:
+            self._avant_modif()
+            coche = w.field_value not in ("Off", "", False, None)
+            w.field_value = "Off" if coche else (w.on_state() or True)
+            w.update()
+            self._apres_modif()
+        elif t == pymupdf.PDF_WIDGET_TYPE_RADIOBUTTON:
+            self._avant_modif()
+            w.field_value = w.on_state() or True
+            w.update()
+            self._apres_modif()
+        elif t in (pymupdf.PDF_WIDGET_TYPE_COMBOBOX, pymupdf.PDF_WIDGET_TYPE_LISTBOX):
+            m = tk.Menu(self, tearoff=False)
+            for v in w.choice_values or []:
+                v = v[1] if isinstance(v, (list, tuple)) else v
+                m.add_command(label=v, command=lambda v=v, x=w.xref: self._valeur_champ(x, v))
+            x0, _y0, _x1, y1 = self._vers_canvas(w.rect)
+            m.tk_popup(int(self.canvas.winfo_rootx() + x0 - self.canvas.canvasx(0)),
+                       int(self.canvas.winfo_rooty() + y1 - self.canvas.canvasy(0)))
+        elif t == pymupdf.PDF_WIDGET_TYPE_SIGNATURE:
+            r = PadSignature(self, "Signer").resultat
+            if r:
+                self.signature = r
+                a = self._vers_canvas(w.rect)
+                ox, oy = self.canvas.canvasx(0), self.canvas.canvasy(0)
+                self._placer_signature((a[0] - ox, a[1] - oy), (a[2] - ox, a[3] - oy))
+        elif t == pymupdf.PDF_WIDGET_TYPE_TEXT:
+            self._editer_champ_texte(w)
+
+    def _valeur_champ(self, xref, valeur):
+        for w in self._champs():
+            if w.xref == xref:
+                self._avant_modif()
+                w.field_value = valeur
+                w.update()
+                self._apres_modif()
+                return
+
+    def _editer_champ_texte(self, w):
+        x0, y0, x1, y1 = self._vers_canvas(w.rect)
+        taille = w.text_fontsize or max(8, min(14, w.rect.height * 0.65))
+        multi = bool(w.field_flags & pymupdf.PDF_TX_FIELD_IS_MULTILINE)
+        police = ("Arial" if WINDOWS else "Helvetica", -max(8, round(taille * self.facteur)))
+        if multi:
+            e = tk.Text(self.canvas, relief="solid", bd=1, font=police, wrap="word", highlightthickness=1,
+                        highlightcolor=BLEU)
+            e.insert("1.0", w.field_value or "")
+        else:
+            e = tk.Entry(self.canvas, relief="solid", bd=1, font=police, highlightthickness=1,
+                         highlightcolor=BLEU)
+            e.insert(0, w.field_value or "")
+        fen = self.canvas.create_window(x0, y0, anchor="nw", window=e, width=max(x1 - x0, 60),
+                                        height=max(y1 - y0, 20), tags="edition")
+        e.focus_set()
+        xref = w.xref
+
+        def lire():
+            return e.get("1.0", "end-1c") if multi else e.get()
+
+        def valider(suivant=0):
+            if not self.edition or self.edition.get("champ") != xref:
+                return "break"
+            valeur = lire()
+            self.canvas.delete(fen)
+            e.destroy()
+            self.edition = None
+            for c in self._champs():
+                if c.xref == xref and (c.field_value or "") != valeur:
+                    self._avant_modif()
+                    c.field_value = valeur
+                    c.update()
+                    self._apres_modif()
+                    break
+            if suivant:
+                champs = [c for c in self._champs() if c.field_type == pymupdf.PDF_WIDGET_TYPE_TEXT]
+                champs.sort(key=lambda c: (round(c.rect.y0), c.rect.x0))
+                idx = next((i for i, c in enumerate(champs) if c.xref == xref), -1)
+                if 0 <= idx + suivant < len(champs):
+                    self._editer_champ_texte(champs[idx + suivant])
+            return "break"
+
+        def annuler(_e=None):
+            self.canvas.delete(fen)
+            e.destroy()
+            self.edition = None
+            return "break"
+
+        if not multi:
+            e.bind("<Return>", lambda ev: valider())
+        e.bind("<Tab>", lambda ev: valider(1))
+        e.bind("<Shift-Tab>", lambda ev: valider(-1))
+        if not WINDOWS:
+            e.bind("<ISO_Left_Tab>", lambda ev: valider(-1))
+        e.bind("<Escape>", annuler)
+        self.edition = {"type": "champ", "champ": xref, "entree": e, "items": (fen,), "valider": valider}
+
+    def _creer_champ(self, a, b):
+        n = sum(len(list(pg.widgets())) for pg in self.doc) + 1
+        r = Formulaire(self, "Créer un champ", [
+            ("type", "Type :", "Texte", ("choix", ["Texte", "Texte sur plusieurs lignes", "Case à cocher",
+                                                   "Liste déroulante", "Signature"])),
+            ("nom", "Nom du champ :", f"champ{n}", "texte"),
+            ("choix", "Choix de la liste (séparés par ;) :", "", "texte")]).resultat
+        if not r:
+            return
+        w = pymupdf.Widget()
+        w.rect = self._rect_page(a, b)
+        w.field_name = r["nom"] or f"champ{n}"
+        types = {"Texte": pymupdf.PDF_WIDGET_TYPE_TEXT, "Texte sur plusieurs lignes": pymupdf.PDF_WIDGET_TYPE_TEXT,
+                 "Case à cocher": pymupdf.PDF_WIDGET_TYPE_CHECKBOX,
+                 "Liste déroulante": pymupdf.PDF_WIDGET_TYPE_COMBOBOX,
+                 "Signature": pymupdf.PDF_WIDGET_TYPE_SIGNATURE}
+        w.field_type = types[r["type"]]
+        if r["type"] == "Texte sur plusieurs lignes":
+            w.field_flags = pymupdf.PDF_TX_FIELD_IS_MULTILINE
+        if w.field_type == pymupdf.PDF_WIDGET_TYPE_TEXT:
+            w.text_fontsize = 0  # taille automatique
+        if w.field_type == pymupdf.PDF_WIDGET_TYPE_COMBOBOX:
+            choix = [c.strip() for c in r["choix"].split(";") if c.strip()] or ["Choix 1", "Choix 2"]
+            w.choice_values = choix
+            w.field_value = choix[0]
+        w.border_color = (0.6, 0.6, 0.6)
+        w.border_width = 0.5
+        self._avant_modif()
+        try:
+            self.doc[self.page_idx].add_widget(w)
+        except Exception as e:
+            self.historique.pop()
+            return messagebox.showerror("Champ", f"Impossible de créer le champ :\n{e}")
+        self._apres_modif()
+        self.statut(f"Champ « {w.field_name} » créé. Outil Formulaire pour le remplir.")
+
+    def aplatir(self):
+        if not self._doc_requis():
+            return
+        if not messagebox.askyesno("Aplatir", "Les champs de formulaire et les annotations deviendront du "
+                                   "contenu fixe de la page (plus modifiables). Continuer ?"):
+            return
+        self._fermer_edition(valider=True)
+        self._avant_modif()
+        self.doc.bake()
+        self._apres_modif(pages=list(range(self.doc.page_count)))
+        self._maj_bandeau()
+        self.statut("Formulaire et annotations aplatis.")
+
+    def exporter_word(self):
+        if not self._doc_requis():
+            return
+        self._fermer_edition(valider=True)
+        reference = self.chemin or getattr(self, "nom_suggere", None) or "document"
+        base = os.path.splitext(os.path.basename(reference))[0]
+        chemin = filedialog.asksaveasfilename(title="Exporter en Word", defaultextension=".docx",
+                                              initialfile=base + ".docx", filetypes=[("Document Word", "*.docx")])
+        if not chemin:
+            return
+        self.config(cursor="watch")
+        self.statut("Conversion en Word…")
+        self.update()
+        tmp = os.path.join(tempfile.gettempdir(), "PDF_Editeur_export.pdf")
+        try:
+            self.doc.save(tmp, garbage=3, deflate=True)
+            conversion.pdf_vers_word(tmp, chemin)
+        except Exception as e:
+            messagebox.showerror("Exporter en Word", str(e))
+            return
+        finally:
+            self.config(cursor="")
+        self.statut(f"Document Word enregistré : {chemin}")
+        if messagebox.askyesno("Exporter en Word", "Le document Word a été créé. L'ouvrir maintenant ?"):
+            _ouvrir_dossier(chemin)
 
     # ================================================================ OCR ==
 
@@ -2219,6 +2490,10 @@ class Editeur(Base):
             "• Annuler : Ctrl+Z — Rétablir : Ctrl+Y.",
             "• Enregistrer : Ctrl+S — Enregistrer sous : Ctrl+Maj+S.",
             "• Polices manquantes : Outils › Polices du document › Installer.",
+            "• Formulaire : outil « Formulaire », cliquez sur un champ (Tab = champ suivant). "
+            "Édition › Créer un champ pour en ajouter.",
+            "• Ouvrir un document Word ou des images : ils sont convertis en PDF automatiquement.",
+            "• Exporter en Word : Fichier › Exporter en Word.",
             "• Document scanné : cliquez « Reconnaître le texte (OCR) » dans le bandeau jaune "
             "(ou Outils › Reconnaître le texte). Le texte devient modifiable comme les autres.",
         ]))

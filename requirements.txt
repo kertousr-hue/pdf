@@ -4,3 +4,4 @@ reportlab>=4.0
 cryptography>=41
 fonttools>=4.40
 tkinterdnd2>=0.4
+pdf2docx>=0.5.6

@@ -22,7 +22,10 @@ Sous macOS ou Linux : `pip install -r requirements.txt`, puis `python pdf_editeu
 
 | | |
 |---|---|
-| **Ouvrir** | Bouton *Ouvrir* (Ctrl+O), **glisser-déposer** un PDF dans la fenêtre, ou un fichier récent depuis l'accueil. Les PDF protégés par mot de passe sont pris en charge. |
+| **Ouvrir** | Bouton *Ouvrir* (Ctrl+O), **glisser-déposer** dans la fenêtre, ou un fichier récent depuis l'accueil. Les PDF protégés par mot de passe sont pris en charge. |
+| **Word et images** | Un document **Word** (.docx, .doc, .rtf, .odt) ou des **images** (JPG, PNG…) s'ouvrent aussi : ils sont convertis en PDF (plusieurs images = un PDF de plusieurs pages). La conversion Word utilise Microsoft Word, ou LibreOffice (gratuit) s'il n'est pas installé. |
+| **Formulaires** | Outil *Formulaire* : cliquez sur un champ pour le remplir (texte, cases à cocher, boutons radio, listes, signature). Tab passe au champ suivant. *Édition › Créer un champ* pour fabriquer votre propre formulaire, *Aplatir* pour le figer. |
+| **Exporter en Word** | *Fichier › Exporter en Word (.docx)* : le PDF devient un document Word modifiable. |
 | **Enregistrer** | *Enregistrer* (Ctrl+S), *Enregistrer sous* (Ctrl+Maj+S) ou *Enregistrer avec mot de passe*. Rien n'est écrit sur le disque tant que vous n'enregistrez pas. |
 | **Modifier le texte** | Outil *Modifier* (Ctrl+E) : chaque texte est encadré. Cliquez dessus, tapez, puis Entrée. Le texte garde sa police, sa taille et sa couleur, et la suite de la ligne se décale. Vous pouvez aussi double-cliquer sur un texte. |
 | **Mise en forme** | Police (toutes les polices installées), taille, **gras**, *italique*, couleur. |
