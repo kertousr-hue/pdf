@@ -8,7 +8,29 @@ Programme en Python pour **lire** et **modifier** des fichiers PDF en ligne de c
 pip install -r requirements.txt
 ```
 
-## Utilisation
+## Interface graphique
+
+```bash
+python pdftool_gui.py
+```
+
+(ou `python pdftool_gui.py mon_fichier.pdf` pour ouvrir directement un fichier)
+
+- **Afficher** le PDF page par page, avec zoom (boutons, Ctrl + molette) et navigation (Page préc./suiv.).
+- **Identifier une police** : cliquez sur un mot (ou glissez pour en sélectionner plusieurs).
+  Le panneau de droite indique la police, la taille, le style, la couleur et si elle est intégrée.
+  *Outils → Polices du document* liste toutes les polices et la police de chaque texte.
+- **Remplacer un texte** : le mot cliqué remplit « Texte actuel » ; tapez le nouveau texte puis
+  *Remplacer*. *Rechercher* encadre les occurrences en orange.
+- **Ajouter du texte** : mode « Ajouter du texte », puis cliquez sur la page.
+- Menus : filigrane, propriétés, pivoter / supprimer / déplacer des pages, fusionner,
+  exporter des pages ou le texte, enregistrer avec mot de passe.
+- **Annuler** (Ctrl+Z) toutes les modifications, une par une. Rien n'est écrit sur le disque
+  tant que vous n'enregistrez pas.
+
+Tkinter est fourni avec Python sur Windows et macOS. Sous Linux : `sudo apt install python3-tk`.
+
+## Utilisation en ligne de commande
 
 ```bash
 python pdftool.py --help              # liste des commandes
@@ -63,12 +85,17 @@ partie de chaque police : si la police d'origine n'est pas installée sur votre 
 lancez `polices` pour trouver son nom, procurez-vous le fichier, puis passez-le avec
 `--fichier-police`.
 
+Si le nouveau texte n'a pas la même longueur, **la suite de la ligne est décalée** pour éviter
+un chevauchement ou un trou. Cela n'est fait que si la suite peut être réécrite dans sa police
+d'origine exacte ; sinon elle est laissée en place et un avertissement s'affiche. Le décalage
+s'arrête à un grand espace (colonne suivante, cellule de tableau).
+
 Options utiles :
+- `--sans-decaler` : ne pas décaler la suite de la ligne ;
 - `--ajuster` : réduit la taille si le nouveau texte est plus long que l'ancien ;
 - `--taille 12` : force une taille ;
 - `--ignorer-casse` : ne distingue pas les majuscules des minuscules ;
 - `--pages 1,3` : limite le remplacement à certaines pages.
 
-Limites : le reste de la ligne n'est pas décalé, donc un texte plus long peut chevaucher la
-suite et un texte plus court laisse un espace. Le texte d'une image (PDF scanné) ne peut
-pas être remplacé.
+Limites : le texte ne passe pas automatiquement à la ligne suivante (pas de reformatage de
+paragraphe), et le texte d'une image (PDF scanné) ne peut pas être remplacé.

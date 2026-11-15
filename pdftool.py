@@ -313,7 +313,8 @@ def police_de_remplacement(page, span, nouveau, polices_inserees, fichier_police
     2. la police intégrée d'origine, si elle contient tous les caractères nécessaires ;
     3. la même police installée sur l'ordinateur (recherche par nom) ;
     4. la police standard la plus proche (Helvetica / Times / Courier + gras / italique).
-    Renvoie (nom_interne_pymupdf, description).
+    Renvoie (nom_interne_pymupdf, description, exacte) ; exacte = False pour le cas 4
+    quand la police d'origine n'est pas une police standard.
     """
     import pymupdf
     doc = page.parent
@@ -323,12 +324,12 @@ def police_de_remplacement(page, span, nouveau, polices_inserees, fichier_police
             try:
                 police = pymupdf.Font(fontbuffer=contenu)
                 ok = all(c == " " or police.has_glyph(ord(c)) for c in nouveau)
-                if ok:
-                    page.insert_font(fontname=cle, fontbuffer=contenu)
                 polices_inserees[cle] = police if ok else None
+                if ok:
+                    polices_inserees.setdefault("_contenus", {})[cle] = contenu
             except Exception:
                 polices_inserees[cle] = None
-        return (cle, description) if polices_inserees[cle] is not None else None
+        return (cle, description, True) if polices_inserees[cle] is not None else None
 
     if fichier_police:
         with open(fichier_police, "rb") as f:
@@ -369,61 +370,137 @@ def police_de_remplacement(page, span, nouveau, polices_inserees, fichier_police
         "Courier": ("Courier", "Courier-Bold", "Courier-Oblique", "Courier-BoldOblique"),
     }[famille][variante]
     if nom_complet == span["font"]:
-        return interne, f"{nom_complet} (police standard d'origine)"
+        return interne, f"{nom_complet} (police standard d'origine)", True
     return interne, (f"{nom_complet} (police la plus proche de {span['font']} : "
-                     f"l'originale est introuvable ou incomplète ; utilisez --fichier-police pour la fournir)")
+                     f"l'originale est introuvable ou incomplète ; utilisez --fichier-police pour la fournir)"), False
+
+
+def _spans_avec_caracteres(page):
+    return [s for b in page.get_text("rawdict")["blocks"] for l in b.get("lines", []) for s in l["spans"]]
+
+
+def _suite_de_ligne(spans, rect, ligne_base):
+    """Caractères situés après `rect` sur la même ligne, regroupés par span : [(span, texte, x)].
+
+    On s'arrête à un grand espace (changement de colonne, cellule de tableau…)."""
+    caracteres = []
+    for s in spans:
+        if abs(s["origin"][1] - ligne_base) > 1:
+            continue
+        for c in s["chars"]:
+            if (c["bbox"][0] + c["bbox"][2]) / 2 > rect.x1:
+                caracteres.append((c, s))
+    caracteres.sort(key=lambda cs: cs[0]["origin"][0])
+    morceaux, fin_prec = [], rect.x1
+    for c, s in caracteres:
+        if c["bbox"][0] - fin_prec > 3 * s["size"]:
+            break
+        fin_prec = max(fin_prec, c["bbox"][2])
+        if morceaux and morceaux[-1][0] is s:
+            morceaux[-1][1].append(c)
+        else:
+            morceaux.append((s, [c]))
+    return [(s, "".join(c["c"] for c in cs), cs) for s, cs in morceaux]
+
+
+def _remplacer_occurrence(page, rect, nouveau, taille, ajuster, fichier_police, decaler, polices):
+    import pymupdf
+    spans = _spans_avec_caracteres(page)
+    span = max(spans, key=lambda s: (pymupdf.Rect(s["bbox"]) & rect).get_area(), default=None)
+    if span is None:
+        return None
+    base = span["origin"][1]
+
+    fontname, desc, _ = police_de_remplacement(page, span, nouveau, polices, fichier_police)
+    t = taille or span["size"]
+    police = polices.get(fontname) or pymupdf.Font(fontname)
+    largeur = police.text_length(nouveau, fontsize=t)
+
+    # Suite de la ligne à décaler : seulement si on peut la réécrire dans sa police exacte
+    suite, raison = [], None
+    if decaler and abs(largeur - rect.width) > 0.5:
+        suite = _suite_de_ligne(spans, rect, base)
+        for i, (s, texte, cs) in enumerate(suite):
+            nom, _d, exacte = police_de_remplacement(page, s, texte, polices)
+            if not exacte:
+                raison = f"police {s['font']} indisponible"
+                suite = []
+                break
+            suite[i] = (s, texte, cs, nom)
+
+    if ajuster and not suite and largeur > rect.width:
+        t *= rect.width / largeur
+        largeur = rect.width
+
+    page.add_redact_annot(rect, fill=False)
+    for _s, _t, cs, _n in suite:
+        zone = pymupdf.Rect(cs[0]["bbox"])
+        for c in cs[1:]:
+            zone |= c["bbox"]
+        page.add_redact_annot(zone, fill=False)
+    # Efface uniquement le texte (pas les images ni les dessins)
+    page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE,
+                          graphics=pymupdf.PDF_REDACT_LINE_ART_NONE)
+
+    # Les polices sont ajoutées après l'effacement (qui retire les ressources inutilisées)
+    for nom in {fontname, *(n for *_r, n in suite)}:
+        contenu = polices.get("_contenus", {}).get(nom)
+        if contenu:
+            page.insert_font(fontname=nom, fontbuffer=contenu)
+    page.insert_text((rect.x0, base), nouveau, fontname=fontname, fontsize=t,
+                     color=pymupdf.sRGB_to_pdf(span["color"]))
+    decalage = rect.x0 + largeur - rect.x1
+    for s, texte, cs, nom in suite:
+        page.insert_text((cs[0]["origin"][0] + decalage, s["origin"][1]), texte, fontname=nom,
+                         fontsize=s["size"], color=pymupdf.sRGB_to_pdf(s["color"]))
+    return {"police": desc, "taille": t, "decale": bool(suite),
+            "deborde": not suite and largeur > rect.width + 1, "raison": raison}
+
+
+def remplacer_texte(doc, ancien, nouveau, pages=None, taille=None, ajuster=False,
+                    ignorer_casse=False, fichier_police=None, decaler=True):
+    """Remplace `ancien` par `nouveau` dans un document PyMuPDF ouvert (modifié sur place).
+
+    `pages` : liste d'indices (base 0), None = toutes.
+    `decaler` : décale la suite de la ligne pour qu'elle ne soit pas chevauchée (ou qu'il ne
+    reste pas de trou), si la police d'origine de cette suite est disponible.
+    Renvoie une liste de dicts {page, police, taille, decale, deborde, raison}.
+    """
+    resultats = []
+    for i in (range(doc.page_count) if pages is None else pages):
+        page = doc[i]
+        rects = page.search_for(ancien)
+        # search_for ignore la casse : on vérifie la correspondance exacte
+        if not ignorer_casse:
+            rects = [r for r in rects if page.get_text("text", clip=r).strip() == ancien]
+        polices = {}
+        # De droite à gauche et de bas en haut : un remplacement ne déplace pas les suivants
+        for rect in sorted(rects, key=lambda r: (-r.y1, -r.x0)):
+            res = _remplacer_occurrence(page, rect, nouveau, taille, ajuster, fichier_police, decaler, polices)
+            if res:
+                res["page"] = i + 1
+                resultats.append(res)
+    return resultats
 
 
 def cmd_remplacer(args):
-    import pymupdf
     doc = ouvrir_fitz(args.fichier, args.mot_de_passe)
-    total = 0
-
-    for i in parse_pages(args.pages, doc.page_count):
-        page = doc[i]
-        spans = [s for b in page.get_text("dict")["blocks"] for l in b.get("lines", []) for s in l["spans"]]
-        a_ecrire = []
-
-        for rect in page.search_for(args.ancien):
-            # search_for ignore la casse : on vérifie la correspondance exacte
-            trouve = page.get_text("text", clip=rect).strip()
-            if not args.ignorer_casse and trouve != args.ancien:
-                continue
-            span = max(spans, key=lambda s: (pymupdf.Rect(s["bbox"]) & rect).get_area(), default=None)
-            if span is None:
-                continue
-            a_ecrire.append((rect, span))
-            page.add_redact_annot(rect, fill=False)
-
-        if not a_ecrire:
-            continue
-        # Efface uniquement le texte (pas les images ni les dessins)
-        page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE,
-                              graphics=pymupdf.PDF_REDACT_LINE_ART_NONE)
-
-        polices_inserees = {}
-        for rect, span in a_ecrire:
-            fontname, desc = police_de_remplacement(page, span, args.nouveau, polices_inserees,
-                                                     args.fichier_police)
-            taille = args.taille or span["size"]
-            police = polices_inserees.get(fontname) or pymupdf.Font(fontname)
-            largeur = police.text_length(args.nouveau, fontsize=taille)
-            if args.ajuster and largeur > rect.width:
-                taille *= rect.width / largeur
-                largeur = rect.width
-            page.insert_text((rect.x0, span["origin"][1]), args.nouveau, fontname=fontname,
-                             fontsize=taille, color=pymupdf.sRGB_to_pdf(span["color"]))
-            total += 1
-            print(f"  p.{i + 1} : « {args.ancien} » -> « {args.nouveau} »  "
-                  f"police : {desc}, {taille:.1f} pt")
-            if largeur > rect.width + 1:
-                print("        attention : le nouveau texte est plus long et peut chevaucher la suite "
-                      "(option --ajuster pour réduire la taille)")
-
-    if total == 0:
+    pages = parse_pages(args.pages, doc.page_count)
+    resultats = remplacer_texte(doc, args.ancien, args.nouveau, pages, args.taille, args.ajuster,
+                                args.ignorer_casse, args.fichier_police, not args.sans_decaler)
+    for r in resultats:
+        print(f"  p.{r['page']} : « {args.ancien} » -> « {args.nouveau} »  "
+              f"police : {r['police']}, {r['taille']:.1f} pt")
+        if r["decale"]:
+            print("        suite de la ligne décalée")
+        if r["deborde"]:
+            print("        attention : le nouveau texte est plus long et peut chevaucher la suite"
+                  + (f" ({r['raison']}, suite non décalée)" if r["raison"] else "")
+                  + " — option --ajuster pour réduire la taille")
+    if not resultats:
         raise ValueError(f"Texte « {args.ancien} » introuvable")
     doc.save(args.sortie, garbage=3, deflate=True)
-    print(f"{total} remplacement(s). Fichier enregistré : {args.sortie}")
+    print(f"{len(resultats)} remplacement(s). Fichier enregistré : {args.sortie}")
 
 
 def cmd_chiffrer(args):
@@ -538,6 +615,8 @@ def construire_parser():
     sp.add_argument("--taille", type=float, help="forcer la taille (défaut : celle d'origine)")
     sp.add_argument("--ajuster", action="store_true",
                     help="réduire la taille si le nouveau texte est plus long que l'ancien")
+    sp.add_argument("--sans-decaler", action="store_true",
+                    help="ne pas décaler la suite de la ligne quand la longueur change")
     sp.add_argument("--fichier-police", help="fichier .ttf/.otf à utiliser pour le nouveau texte")
     sp.add_argument("--ignorer-casse", action="store_true", help="ne pas distinguer majuscules/minuscules")
     sp.set_defaults(func=cmd_remplacer)
@@ -564,7 +643,7 @@ def main(argv=None):
     except FileNotFoundError as e:
         print(f"Erreur : fichier introuvable : {e.filename}", file=sys.stderr)
         return 1
-    except (ValueError, OSError) as e:
+    except Exception as e:
         print(f"Erreur : {e}", file=sys.stderr)
         return 1
     return 0
