@@ -211,6 +211,221 @@ def cmd_metadonnees(args):
     enregistrer(writer, args.sortie)
 
 
+# --------------------------------------------------------------------------- #
+# Polices et remplacement de texte (PyMuPDF)
+# --------------------------------------------------------------------------- #
+
+def ouvrir_fitz(chemin, mot_de_passe=None):
+    import pymupdf
+    doc = pymupdf.open(chemin)
+    if doc.needs_pass and not doc.authenticate(mot_de_passe or ""):
+        raise ValueError(f"'{chemin}' est protégé : mot de passe manquant ou incorrect")
+    return doc
+
+
+def nom_lisible(basefont):
+    """'ABCDEF+Arial-BoldMT' -> 'Arial-BoldMT' (retire le préfixe de sous-ensemble)."""
+    if len(basefont) > 7 and basefont[6] == "+":
+        return basefont[7:]
+    return basefont
+
+
+def style_span(span):
+    flags, nom = span["flags"], span["font"].lower()
+    gras = bool(flags & 16) or "bold" in nom or "black" in nom or "heavy" in nom
+    italique = bool(flags & 2) or "italic" in nom or "oblique" in nom
+    return gras, italique
+
+
+def couleur_hex(entier):
+    return f"#{entier:06x}"
+
+
+def cmd_polices(args):
+    doc = ouvrir_fitz(args.fichier, args.mot_de_passe)
+    pages = parse_pages(args.pages, doc.page_count)
+
+    # 1) Polices déclarées dans le fichier
+    vues = {}
+    for i in pages:
+        for _xref, ext, typ, basefont, _nom, _enc, *_ in doc[i].get_fonts(full=True):
+            entree = vues.setdefault((basefont, typ, ext), {"nom": basefont, "type": typ, "ext": ext, "pages": []})
+            entree["pages"].append(i + 1)
+
+    print(f"Polices utilisées ({len(vues)}) :")
+    for e in sorted(vues.values(), key=lambda e: e["nom"]):
+        integree = "non intégrée" if e["ext"] == "n/a" else f"intégrée ({e['ext']})"
+        sous_ens = ", sous-ensemble" if nom_lisible(e["nom"]) != e["nom"] else ""
+        pages_txt = ",".join(map(str, sorted(set(e["pages"]))))
+        print(f"  - {nom_lisible(e['nom']):<32} {e['type']:<10} {integree}{sous_ens}  pages {pages_txt}")
+
+    # 2) Détail : police utilisée pour chaque morceau de texte
+    if args.detail or args.chercher:
+        print()
+        for i in pages:
+            for bloc in doc[i].get_text("dict")["blocks"]:
+                for ligne in bloc.get("lines", []):
+                    for span in ligne["spans"]:
+                        txt = span["text"].strip()
+                        if not txt or (args.chercher and args.chercher not in span["text"]):
+                            continue
+                        gras, ita = style_span(span)
+                        style = " ".join(s for s, ok in (("gras", gras), ("italique", ita)) if ok) or "normal"
+                        print(f"  p.{i + 1}  {span['font']:<28} {span['size']:5.1f} pt  "
+                              f"{style:<15} {couleur_hex(span['color'])}  « {txt[:60]} »")
+
+
+DOSSIERS_POLICES = [
+    "/usr/share/fonts", "/usr/local/share/fonts", "~/.fonts", "~/.local/share/fonts",
+    "/Library/Fonts", "/System/Library/Fonts", "~/Library/Fonts",
+    "C:/Windows/Fonts", "~/AppData/Local/Microsoft/Windows/Fonts",
+]
+_index_polices = None
+
+
+def normaliser(nom):
+    nom = nom_lisible(nom).lower()
+    for suffixe in ("mt", "ps"):
+        if nom.endswith(suffixe):
+            nom = nom[: -len(suffixe)]
+    return "".join(c for c in nom if c.isalnum()).replace("regular", "")
+
+
+def police_systeme(nom_police):
+    """Cherche sur l'ordinateur un fichier .ttf/.otf portant le même nom que la police du PDF."""
+    import os
+    global _index_polices
+    if _index_polices is None:
+        _index_polices = {}
+        for dossier in DOSSIERS_POLICES:
+            for racine, _d, fichiers in os.walk(os.path.expanduser(dossier)):
+                for f in fichiers:
+                    base, ext = os.path.splitext(f)
+                    if ext.lower() in (".ttf", ".otf"):
+                        _index_polices.setdefault(normaliser(base), os.path.join(racine, f))
+    return _index_polices.get(normaliser(nom_police))
+
+
+def police_de_remplacement(page, span, nouveau, polices_inserees, fichier_police=None):
+    """Choisit la police pour le nouveau texte, dans cet ordre :
+
+    1. le fichier de police fourni par l'utilisateur (--fichier-police) ;
+    2. la police intégrée d'origine, si elle contient tous les caractères nécessaires ;
+    3. la même police installée sur l'ordinateur (recherche par nom) ;
+    4. la police standard la plus proche (Helvetica / Times / Courier + gras / italique).
+    Renvoie (nom_interne_pymupdf, description).
+    """
+    import pymupdf
+    doc = page.parent
+
+    def essayer(cle, contenu, description):
+        if cle not in polices_inserees:
+            try:
+                police = pymupdf.Font(fontbuffer=contenu)
+                ok = all(c == " " or police.has_glyph(ord(c)) for c in nouveau)
+                if ok:
+                    page.insert_font(fontname=cle, fontbuffer=contenu)
+                polices_inserees[cle] = police if ok else None
+            except Exception:
+                polices_inserees[cle] = None
+        return (cle, description) if polices_inserees[cle] is not None else None
+
+    if fichier_police:
+        with open(fichier_police, "rb") as f:
+            res = essayer("utilisateur", f.read(), f"{fichier_police} (fournie)")
+        if res:
+            return res
+        print(f"        attention : {fichier_police} ne contient pas tous les caractères de « {nouveau} »")
+
+    for xref, ext, _typ, basefont, *_ in page.get_fonts(full=True):
+        if nom_lisible(basefont) == span["font"] and ext not in ("n/a", ""):
+            res = essayer(f"orig{xref}", doc.extract_font(xref)[3], f"{span['font']} (police d'origine intégrée)")
+            if res:
+                return res
+            break
+
+    chemin = police_systeme(span["font"])
+    if chemin:
+        with open(chemin, "rb") as f:
+            res = essayer(f"sys{normaliser(span['font'])}", f.read(),
+                          f"{span['font']} (police d'origine, trouvée sur l'ordinateur : {chemin})")
+        if res:
+            return res
+
+    nom = span["font"].lower()
+    gras, ita = style_span(span)
+    if span["flags"] & 8 or any(k in nom for k in ("courier", "mono", "consol")):
+        famille, noms = "Courier", ("cour", "cobo", "coit", "cobi")
+    elif span["flags"] & 4 or any(k in nom for k in ("times", "serif", "roman", "georgia", "garamond", "cambria")) \
+            and "sans" not in nom:
+        famille, noms = "Times", ("tiro", "tibo", "tiit", "tibi")
+    else:
+        famille, noms = "Helvetica", ("helv", "hebo", "heit", "hebi")
+    variante = (1 if gras else 0) + (2 if ita else 0)
+    interne = noms[variante]
+    nom_complet = {
+        "Helvetica": ("Helvetica", "Helvetica-Bold", "Helvetica-Oblique", "Helvetica-BoldOblique"),
+        "Times": ("Times-Roman", "Times-Bold", "Times-Italic", "Times-BoldItalic"),
+        "Courier": ("Courier", "Courier-Bold", "Courier-Oblique", "Courier-BoldOblique"),
+    }[famille][variante]
+    if nom_complet == span["font"]:
+        return interne, f"{nom_complet} (police standard d'origine)"
+    return interne, (f"{nom_complet} (police la plus proche de {span['font']} : "
+                     f"l'originale est introuvable ou incomplète ; utilisez --fichier-police pour la fournir)")
+
+
+def cmd_remplacer(args):
+    import pymupdf
+    doc = ouvrir_fitz(args.fichier, args.mot_de_passe)
+    total = 0
+
+    for i in parse_pages(args.pages, doc.page_count):
+        page = doc[i]
+        spans = [s for b in page.get_text("dict")["blocks"] for l in b.get("lines", []) for s in l["spans"]]
+        a_ecrire = []
+
+        for rect in page.search_for(args.ancien):
+            # search_for ignore la casse : on vérifie la correspondance exacte
+            trouve = page.get_text("text", clip=rect).strip()
+            if not args.ignorer_casse and trouve != args.ancien:
+                continue
+            span = max(spans, key=lambda s: (pymupdf.Rect(s["bbox"]) & rect).get_area(), default=None)
+            if span is None:
+                continue
+            a_ecrire.append((rect, span))
+            page.add_redact_annot(rect, fill=False)
+
+        if not a_ecrire:
+            continue
+        # Efface uniquement le texte (pas les images ni les dessins)
+        page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE,
+                              graphics=pymupdf.PDF_REDACT_LINE_ART_NONE)
+
+        polices_inserees = {}
+        for rect, span in a_ecrire:
+            fontname, desc = police_de_remplacement(page, span, args.nouveau, polices_inserees,
+                                                     args.fichier_police)
+            taille = args.taille or span["size"]
+            police = polices_inserees.get(fontname) or pymupdf.Font(fontname)
+            largeur = police.text_length(args.nouveau, fontsize=taille)
+            if args.ajuster and largeur > rect.width:
+                taille *= rect.width / largeur
+                largeur = rect.width
+            page.insert_text((rect.x0, span["origin"][1]), args.nouveau, fontname=fontname,
+                             fontsize=taille, color=pymupdf.sRGB_to_pdf(span["color"]))
+            total += 1
+            print(f"  p.{i + 1} : « {args.ancien} » -> « {args.nouveau} »  "
+                  f"police : {desc}, {taille:.1f} pt")
+            if largeur > rect.width + 1:
+                print("        attention : le nouveau texte est plus long et peut chevaucher la suite "
+                      "(option --ajuster pour réduire la taille)")
+
+    if total == 0:
+        raise ValueError(f"Texte « {args.ancien} » introuvable")
+    doc.save(args.sortie, garbage=3, deflate=True)
+    print(f"{total} remplacement(s). Fichier enregistré : {args.sortie}")
+
+
 def cmd_chiffrer(args):
     reader = ouvrir(args.fichier)
     writer = PdfWriter(clone_from=reader)
@@ -307,7 +522,27 @@ def construire_parser():
     sp.add_argument("--sujet")
     sp.set_defaults(func=cmd_metadonnees)
 
-    sp = sub.add_parser("chiffrer", help="protéger par mot de passe (AES-256)")
+    sp = sub.add_parser("polices", help="identifier les polices d'écriture")
+    entree_sortie(sp, sortie=False)
+    sp.add_argument("--pages", help="défaut : toutes")
+    sp.add_argument("--detail", action="store_true",
+                    help="afficher la police, la taille et la couleur de chaque morceau de texte")
+    sp.add_argument("--chercher", help="afficher seulement la police du texte contenant ce mot")
+    sp.set_defaults(func=cmd_polices)
+
+    sp = sub.add_parser("remplacer", help="remplacer un texte existant par un autre")
+    entree_sortie(sp)
+    sp.add_argument("--ancien", required=True, help="texte à remplacer")
+    sp.add_argument("--nouveau", required=True, help="nouveau texte")
+    sp.add_argument("--pages", help="défaut : toutes")
+    sp.add_argument("--taille", type=float, help="forcer la taille (défaut : celle d'origine)")
+    sp.add_argument("--ajuster", action="store_true",
+                    help="réduire la taille si le nouveau texte est plus long que l'ancien")
+    sp.add_argument("--fichier-police", help="fichier .ttf/.otf à utiliser pour le nouveau texte")
+    sp.add_argument("--ignorer-casse", action="store_true", help="ne pas distinguer majuscules/minuscules")
+    sp.set_defaults(func=cmd_remplacer)
+
+    sp = sub.add_parser("chiffrer",help="protéger par mot de passe (AES-256)")
     sp.add_argument("fichier")
     sp.add_argument("sortie")
     sp.add_argument("--mot-de-passe", required=True)
