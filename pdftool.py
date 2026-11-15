@@ -17,6 +17,7 @@ Exemples :
 
 import argparse
 import io
+import os
 import sys
 
 from pypdf import PdfReader, PdfWriter
@@ -275,104 +276,122 @@ def cmd_polices(args):
                               f"{style:<15} {couleur_hex(span['color'])}  « {txt[:60]} »")
 
 
-DOSSIERS_POLICES = [
-    "/usr/share/fonts", "/usr/local/share/fonts", "~/.fonts", "~/.local/share/fonts",
-    "/Library/Fonts", "/System/Library/Fonts", "~/Library/Fonts",
-    "C:/Windows/Fonts", "~/AppData/Local/Microsoft/Windows/Fonts",
-]
-_index_polices = None
+# Télécharger automatiquement depuis Google Fonts les polices introuvables sur l'ordinateur
+TELECHARGER_POLICES = True
+
+BASE14 = {
+    "Helvetica": ("helv", "hebo", "heit", "hebi"),
+    "Times": ("tiro", "tibo", "tiit", "tibi"),
+    "Courier": ("cour", "cobo", "coit", "cobi"),
+}
+NOMS_BASE14 = {
+    "Helvetica": ("Helvetica", "Helvetica-Bold", "Helvetica-Oblique", "Helvetica-BoldOblique"),
+    "Times": ("Times-Roman", "Times-Bold", "Times-Italic", "Times-BoldItalic"),
+    "Courier": ("Courier", "Courier-Bold", "Courier-Oblique", "Courier-BoldOblique"),
+}
 
 
-def normaliser(nom):
-    nom = nom_lisible(nom).lower()
-    for suffixe in ("mt", "ps"):
-        if nom.endswith(suffixe):
-            nom = nom[: -len(suffixe)]
-    return "".join(c for c in nom if c.isalnum()).replace("regular", "")
+def _famille_base14(nom, flags=0):
+    nom = nom.lower()
+    if flags & 8 or any(k in nom for k in ("courier", "mono", "consol")):
+        return "Courier"
+    if (flags & 4 or any(k in nom for k in ("times", "serif", "roman", "georgia", "garamond", "cambria"))) \
+            and "sans" not in nom:
+        return "Times"
+    return "Helvetica"
 
 
-def police_systeme(nom_police):
-    """Cherche sur l'ordinateur un fichier .ttf/.otf portant le même nom que la police du PDF."""
-    import os
-    global _index_polices
-    if _index_polices is None:
-        _index_polices = {}
-        for dossier in DOSSIERS_POLICES:
-            for racine, _d, fichiers in os.walk(os.path.expanduser(dossier)):
-                for f in fichiers:
-                    base, ext = os.path.splitext(f)
-                    if ext.lower() in (".ttf", ".otf"):
-                        _index_polices.setdefault(normaliser(base), os.path.join(racine, f))
-    return _index_polices.get(normaliser(nom_police))
-
-
-def police_de_remplacement(page, span, nouveau, polices_inserees, fichier_police=None):
-    """Choisit la police pour le nouveau texte, dans cet ordre :
-
-    1. le fichier de police fourni par l'utilisateur (--fichier-police) ;
-    2. la police intégrée d'origine, si elle contient tous les caractères nécessaires ;
-    3. la même police installée sur l'ordinateur (recherche par nom) ;
-    4. la police standard la plus proche (Helvetica / Times / Courier + gras / italique).
-    Renvoie (nom_interne_pymupdf, description, exacte) ; exacte = False pour le cas 4
-    quand la police d'origine n'est pas une police standard.
-    """
+def _charger_police(page, cache, cle, contenu, texte):
+    """Vérifie qu'une police (octets) contient tous les caractères de `texte` ; la garde en cache."""
     import pymupdf
-    doc = page.parent
+    if cle not in cache:
+        try:
+            police = pymupdf.Font(fontbuffer=contenu)
+            cache[cle] = police
+            cache.setdefault("_contenus", {})[cle] = contenu
+        except Exception:
+            cache[cle] = None
+    police = cache[cle]
+    if police is None or not all(c.isspace() or police.has_glyph(ord(c)) for c in texte):
+        return None
+    return cle
 
-    def essayer(cle, contenu, description):
-        if cle not in polices_inserees:
-            try:
-                police = pymupdf.Font(fontbuffer=contenu)
-                ok = all(c == " " or police.has_glyph(ord(c)) for c in nouveau)
-                polices_inserees[cle] = police if ok else None
-                if ok:
-                    polices_inserees.setdefault("_contenus", {})[cle] = contenu
-            except Exception:
-                polices_inserees[cle] = None
-        return (cle, description, True) if polices_inserees[cle] is not None else None
+
+def _cle_entree(entree):
+    import hashlib
+    return "F" + hashlib.md5(f"{entree['chemin']}|{entree['index']}".encode()).hexdigest()[:10]
+
+
+def police_installee(page, cache, entree, texte):
+    """Prépare une police de l'index (polices.INDEX) pour écrire `texte`. Renvoie le nom interne ou None."""
+    import polices
+    try:
+        return _charger_police(page, cache, _cle_entree(entree), polices.INDEX.contenu(entree), texte)
+    except Exception:
+        return None
+
+
+def police_de_remplacement(page, span, texte, cache, fichier_police=None):
+    """Choisit la police pour écrire `texte` à la place de `span`, dans cet ordre :
+
+    1. le fichier de police fourni par l'utilisateur ;
+    2. la police intégrée au PDF, si elle contient tous les caractères ;
+    3. la police standard PDF du même nom (Helvetica, Times, Courier) ;
+    4. la même police installée sur l'ordinateur ;
+    5. la même police téléchargée depuis Google Fonts (si TELECHARGER_POLICES) ;
+    6. une police équivalente installée (ex. Liberation Sans pour Arial) ;
+    7. la police standard la plus proche.
+    Renvoie (nom_interne, description, exacte).
+    """
+    import polices
+    doc = page.parent
+    nom = span["font"]
+    gras, ita = style_span(span)
 
     if fichier_police:
         with open(fichier_police, "rb") as f:
-            res = essayer("utilisateur", f.read(), f"{fichier_police} (fournie)")
-        if res:
-            return res
-        print(f"        attention : {fichier_police} ne contient pas tous les caractères de « {nouveau} »")
+            cle = _charger_police(page, cache, "utilisateur", f.read(), texte)
+        if cle:
+            return cle, f"{os.path.basename(fichier_police)} (fournie)", True
 
     for xref, ext, _typ, basefont, *_ in page.get_fonts(full=True):
-        if nom_lisible(basefont) == span["font"] and ext not in ("n/a", ""):
-            res = essayer(f"orig{xref}", doc.extract_font(xref)[3], f"{span['font']} (police d'origine intégrée)")
-            if res:
-                return res
+        if nom_lisible(basefont) == nom and ext not in ("n/a", ""):
+            try:
+                cle = _charger_police(page, cache, f"orig{xref}", doc.extract_font(xref)[3], texte)
+            except Exception:
+                cle = None
+            if cle:
+                return cle, f"{nom} (police d'origine intégrée)", True
             break
 
-    chemin = police_systeme(span["font"])
-    if chemin:
-        with open(chemin, "rb") as f:
-            res = essayer(f"sys{normaliser(span['font'])}", f.read(),
-                          f"{span['font']} (police d'origine, trouvée sur l'ordinateur : {chemin})")
-        if res:
-            return res
-
-    nom = span["font"].lower()
-    gras, ita = style_span(span)
-    if span["flags"] & 8 or any(k in nom for k in ("courier", "mono", "consol")):
-        famille, noms = "Courier", ("cour", "cobo", "coit", "cobi")
-    elif span["flags"] & 4 or any(k in nom for k in ("times", "serif", "roman", "georgia", "garamond", "cambria")) \
-            and "sans" not in nom:
-        famille, noms = "Times", ("tiro", "tibo", "tiit", "tibi")
-    else:
-        famille, noms = "Helvetica", ("helv", "hebo", "heit", "hebi")
+    famille14 = _famille_base14(nom, span["flags"])
     variante = (1 if gras else 0) + (2 if ita else 0)
-    interne = noms[variante]
-    nom_complet = {
-        "Helvetica": ("Helvetica", "Helvetica-Bold", "Helvetica-Oblique", "Helvetica-BoldOblique"),
-        "Times": ("Times-Roman", "Times-Bold", "Times-Italic", "Times-BoldItalic"),
-        "Courier": ("Courier", "Courier-Bold", "Courier-Oblique", "Courier-BoldOblique"),
-    }[famille][variante]
-    if nom_complet == span["font"]:
-        return interne, f"{nom_complet} (police standard d'origine)", True
-    return interne, (f"{nom_complet} (police la plus proche de {span['font']} : "
-                     f"l'originale est introuvable ou incomplète ; utilisez --fichier-police pour la fournir)"), False
+    if NOMS_BASE14[famille14][variante] == nom:
+        return BASE14[famille14][variante], f"{nom} (police standard d'origine)", True
+
+    entree, exacte = polices.INDEX.chercher(nom, gras, ita)
+    if entree and exacte:
+        cle = police_installee(page, cache, entree, texte)
+        if cle:
+            return cle, f"{entree['complet']} (installée)", True
+
+    if TELECHARGER_POLICES:
+        tele = polices.INDEX.telecharger_google(nom, gras, ita)
+        if tele:
+            cle = police_installee(page, cache, tele, texte)
+            if cle:
+                meme = polices.normaliser(tele["famille"]) == polices.analyser_nom(nom)[0]
+                return cle, f"{tele['complet']} (téléchargée de Google Fonts)", meme
+            entree, exacte = polices.INDEX.chercher(nom, gras, ita)
+
+    if entree:
+        cle = police_installee(page, cache, entree, texte)
+        if cle:
+            return cle, f"{entree['complet']} (équivalente à {nom})", False
+
+    nom14 = NOMS_BASE14[famille14][variante]
+    return BASE14[famille14][variante], (f"{nom14} (la plus proche de {nom}, introuvable sur l'ordinateur ; "
+                                         "ajoutez-la ou utilisez --fichier-police)"), False
 
 
 def _spans_avec_caracteres(page):
@@ -380,7 +399,7 @@ def _spans_avec_caracteres(page):
 
 
 def _suite_de_ligne(spans, rect, ligne_base):
-    """Caractères situés après `rect` sur la même ligne, regroupés par span : [(span, texte, x)].
+    """Caractères situés après `rect` sur la même ligne, regroupés par span : [(span, texte, chars)].
 
     On s'arrête à un grand espace (changement de colonne, cellule de tableau…)."""
     caracteres = []
@@ -403,25 +422,49 @@ def _suite_de_ligne(spans, rect, ligne_base):
     return [(s, "".join(c["c"] for c in cs), cs) for s, cs in morceaux]
 
 
-def _remplacer_occurrence(page, rect, nouveau, taille, ajuster, fichier_police, decaler, polices):
+def _zone_effacement(rect):
+    """Rétrécit verticalement la zone : sinon les lettres des lignes voisines serrées sont effacées."""
     import pymupdf
+    h = rect.height
+    return pymupdf.Rect(rect.x0, rect.y0 + h * 0.3, rect.x1, rect.y1 - h * 0.3)
+
+
+def _remplacer_occurrence(page, rect, nouveau, taille=None, ajuster=False, fichier_police=None,
+                          decaler=True, cache=None, style=None):
+    """Remplace le texte situé dans `rect` par `nouveau`.
+
+    style (facultatif) : {"entree": police de l'index, "base14": nom interne standard,
+                          "taille": float, "couleur": (r, g, b)} pour imposer la mise en forme."""
+    import pymupdf
+    cache = {} if cache is None else cache
+    style = style or {}
     spans = _spans_avec_caracteres(page)
     span = max(spans, key=lambda s: (pymupdf.Rect(s["bbox"]) & rect).get_area(), default=None)
     if span is None:
         return None
     base = span["origin"][1]
 
-    fontname, desc, _ = police_de_remplacement(page, span, nouveau, polices, fichier_police)
-    t = taille or span["size"]
-    police = polices.get(fontname) or pymupdf.Font(fontname)
-    largeur = police.text_length(nouveau, fontsize=t)
+    fontname = None
+    if style.get("entree"):
+        fontname = police_installee(page, cache, style["entree"], nouveau)
+        desc = f"{style['entree']['complet']} (choisie)"
+        if not fontname:
+            desc = f"{style['entree']['complet']} ne contient pas tous les caractères"
+    elif style.get("base14"):
+        fontname, desc = style["base14"], "police standard (choisie)"
+    if not fontname:
+        fontname, desc, _ = police_de_remplacement(page, span, nouveau, cache, fichier_police)
+    t = style.get("taille") or taille or span["size"]
+    couleur = style.get("couleur") or pymupdf.sRGB_to_pdf(span["color"])
+    police = cache.get(fontname) or pymupdf.Font(fontname)
+    largeur = police.text_length(nouveau, fontsize=t) if nouveau else 0
 
     # Suite de la ligne à décaler : seulement si on peut la réécrire dans sa police exacte
     suite, raison = [], None
     if decaler and abs(largeur - rect.width) > 0.5:
         suite = _suite_de_ligne(spans, rect, base)
         for i, (s, texte, cs) in enumerate(suite):
-            nom, _d, exacte = police_de_remplacement(page, s, texte, polices)
+            nom, _d, exacte = police_de_remplacement(page, s, texte, cache)
             if not exacte:
                 raison = f"police {s['font']} indisponible"
                 suite = []
@@ -432,29 +475,48 @@ def _remplacer_occurrence(page, rect, nouveau, taille, ajuster, fichier_police, 
         t *= rect.width / largeur
         largeur = rect.width
 
-    page.add_redact_annot(rect, fill=False)
+    page.add_redact_annot(_zone_effacement(rect), fill=False)
     for _s, _t, cs, _n in suite:
         zone = pymupdf.Rect(cs[0]["bbox"])
         for c in cs[1:]:
             zone |= c["bbox"]
-        page.add_redact_annot(zone, fill=False)
+        page.add_redact_annot(_zone_effacement(zone), fill=False)
     # Efface uniquement le texte (pas les images ni les dessins)
     page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE,
                           graphics=pymupdf.PDF_REDACT_LINE_ART_NONE)
 
     # Les polices sont ajoutées après l'effacement (qui retire les ressources inutilisées)
     for nom in {fontname, *(n for *_r, n in suite)}:
-        contenu = polices.get("_contenus", {}).get(nom)
+        contenu = cache.get("_contenus", {}).get(nom)
         if contenu:
             page.insert_font(fontname=nom, fontbuffer=contenu)
-    page.insert_text((rect.x0, base), nouveau, fontname=fontname, fontsize=t,
-                     color=pymupdf.sRGB_to_pdf(span["color"]))
+    if nouveau:
+        page.insert_text((rect.x0, base), nouveau, fontname=fontname, fontsize=t, color=couleur)
     decalage = rect.x0 + largeur - rect.x1
     for s, texte, cs, nom in suite:
         page.insert_text((cs[0]["origin"][0] + decalage, s["origin"][1]), texte, fontname=nom,
                          fontsize=s["size"], color=pymupdf.sRGB_to_pdf(s["color"]))
-    return {"police": desc, "taille": t, "decale": bool(suite),
-            "deborde": not suite and largeur > rect.width + 1, "raison": raison}
+    deborde = not suite and largeur > rect.width + 1 and bool(_suite_de_ligne(spans, rect, base))
+    return {"police": desc, "taille": t, "decale": bool(suite), "deborde": deborde, "raison": raison}
+
+
+def modifier_texte(page, rect, nouveau, style=None, decaler=True):
+    """Remplace le texte d'une zone précise (utilisé par l'éditeur graphique)."""
+    return _remplacer_occurrence(page, rect, nouveau, decaler=decaler, style=style)
+
+
+def inserer_texte(page, point, texte, entree=None, base14="helv", taille=12, couleur=(0, 0, 0)):
+    """Écrit du texte (plusieurs lignes possibles) avec une police de l'index ou une police standard."""
+    cache = {}
+    nom = police_installee(page, cache, entree, texte) if entree else None
+    if nom:
+        page.insert_font(fontname=nom, fontbuffer=cache["_contenus"][nom])
+    else:
+        nom = base14
+    for i, ligne in enumerate(texte.split("\n")):
+        page.insert_text((point.x, point.y + i * taille * 1.25), ligne, fontname=nom, fontsize=taille,
+                         color=couleur, rotate=page.rotation)
+    return nom
 
 
 def remplacer_texte(doc, ancien, nouveau, pages=None, taille=None, ajuster=False,
@@ -473,10 +535,10 @@ def remplacer_texte(doc, ancien, nouveau, pages=None, taille=None, ajuster=False
         # search_for ignore la casse : on vérifie la correspondance exacte
         if not ignorer_casse:
             rects = [r for r in rects if page.get_text("text", clip=r).strip() == ancien]
-        polices = {}
+        cache = {}
         # De droite à gauche et de bas en haut : un remplacement ne déplace pas les suivants
         for rect in sorted(rects, key=lambda r: (-r.y1, -r.x0)):
-            res = _remplacer_occurrence(page, rect, nouveau, taille, ajuster, fichier_police, decaler, polices)
+            res = _remplacer_occurrence(page, rect, nouveau, taille, ajuster, fichier_police, decaler, cache)
             if res:
                 res["page"] = i + 1
                 resultats.append(res)
@@ -484,6 +546,8 @@ def remplacer_texte(doc, ancien, nouveau, pages=None, taille=None, ajuster=False
 
 
 def cmd_remplacer(args):
+    global TELECHARGER_POLICES
+    TELECHARGER_POLICES = not args.hors_ligne
     doc = ouvrir_fitz(args.fichier, args.mot_de_passe)
     pages = parse_pages(args.pages, doc.page_count)
     resultats = remplacer_texte(doc, args.ancien, args.nouveau, pages, args.taille, args.ajuster,
@@ -615,6 +679,8 @@ def construire_parser():
     sp.add_argument("--taille", type=float, help="forcer la taille (défaut : celle d'origine)")
     sp.add_argument("--ajuster", action="store_true",
                     help="réduire la taille si le nouveau texte est plus long que l'ancien")
+    sp.add_argument("--hors-ligne", action="store_true",
+                    help="ne pas télécharger les polices manquantes depuis Google Fonts")
     sp.add_argument("--sans-decaler", action="store_true",
                     help="ne pas décaler la suite de la ligne quand la longueur change")
     sp.add_argument("--fichier-police", help="fichier .ttf/.otf à utiliser pour le nouveau texte")
