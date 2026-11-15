@@ -34,6 +34,26 @@ Sous macOS ou Linux : `pip install -r requirements.txt`, puis `python pdf_editeu
 | **Autres** | Fusionner, exporter des pages, des images PNG ou le texte, filigrane, numéros de page, propriétés, effacer définitivement une zone, imprimer. |
 | **Annuler / Rétablir** | Ctrl+Z / Ctrl+Y, autant de fois que nécessaire. |
 
+## Documents scannés
+
+Un PDF scanné ne contient qu'une **image** de la page. À l'ouverture, un bandeau jaune
+propose **« Reconnaître le texte (OCR) »** :
+
+1. le texte de l'image est lu (français, anglais, allemand, espagnol… au choix) ; la première
+   fois, les fichiers de langue sont téléchargés (quelques Mo, une seule fois) ;
+2. le texte reconnu est ajouté **de façon invisible** sur l'image : le document devient
+   sélectionnable, cherchable et copiable, sans perte de qualité ;
+3. avec l'outil **Modifier**, cliquez sur une ligne et tapez : l'ancien texte est recouvert
+   de la couleur du papier, et le nouveau est écrit **dans la couleur de l'encre et dans la
+   police la plus ressemblante**. Le programme compare l'image du texte avec chaque police
+   installée pour identifier la bonne (Arial, Times, Calibri, Courier…) et sa taille ;
+4. **Rechercher et remplacer** fonctionne aussi : la suite de la ligne (l'image) est décalée.
+
+La police estimée s'affiche dans la barre de mise en forme ; vous pouvez la changer avant
+de valider. Les PDF déjà « cherchables » produits par un scanner sont reconnus directement.
+
+Conseils pour un bon résultat : scannez à **300 dpi**, bien droit, en couleur ou en niveaux de gris.
+
 ## Les polices
 
 Pour qu'un texte modifié garde son apparence, le programme doit disposer de la police
@@ -76,6 +96,7 @@ python pdftool.py --help
 | Filigrane | `python pdftool.py filigrane doc.pdf sortie.pdf --texte "CONFIDENTIEL"` |
 | Métadonnées | `python pdftool.py metadonnees doc.pdf sortie.pdf --titre "Titre"` |
 | Mot de passe | `python pdftool.py chiffrer doc.pdf sortie.pdf --mot-de-passe secret` |
+| OCR d'un scan | `python pdftool.py ocr scan.pdf sortie.pdf --langues fra+eng` |
 
 Options de `remplacer` : `--ajuster` (réduit la taille si le texte est plus long),
 `--sans-decaler`, `--fichier-police police.ttf`, `--hors-ligne` (pas de téléchargement),
@@ -85,5 +106,7 @@ Options de `remplacer` : `--ajuster` (réduit la taille si le texte est plus lon
 
 - Le texte est modifié **ligne par ligne** : il ne passe pas automatiquement à la ligne
   suivante comme dans un traitement de texte.
-- Un PDF scanné est une image : son texte ne peut pas être modifié.
+- Sur un document scanné, la police est estimée : elle peut différer légèrement de
+  l'originale, surtout pour une écriture manuscrite ou une police rare. Un scan de mauvaise
+  qualité (flou, penché, basse résolution) donne une reconnaissance moins fiable.
 - Le décalage de la suite de la ligne n'est fait que si sa police d'origine est disponible.

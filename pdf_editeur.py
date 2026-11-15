@@ -18,6 +18,7 @@ import pymupdf
 
 import pdftool
 import polices
+import scan
 
 WINDOWS = sys.platform == "win32"
 CTRL = "Command" if sys.platform == "darwin" else "Control"
@@ -385,6 +386,8 @@ class Editeur(Base):
         barre.add_cascade(label="Pages", menu=m)
 
         m = tk.Menu(barre, tearoff=False)
+        m.add_command(label="Reconnaître le texte d'un scan (OCR)…", command=lambda: self.lancer_ocr(choisir=True))
+        m.add_separator()
         m.add_command(label="Polices du document…", command=self.fenetre_polices_document)
         m.add_command(label="Gérer les polices…", command=self.fenetre_gestion_polices)
         m.add_separator()
@@ -496,6 +499,16 @@ class Editeur(Base):
         cz.pack(side="left", padx=2)
         cz.bind("<<ComboboxSelected>>", lambda e: self._choix_zoom())
         ttk.Button(self.statut_barre, text="+", width=3, command=lambda: self.changer_zoom(1)).pack(side="left", padx=(0, 6))
+
+        # Bandeau pour les documents scannés
+        self.bandeau = tk.Frame(self, bg="#fff4ce", padx=10, pady=6)
+        tk.Label(self.bandeau, text="Ce document est scanné : son texte est une image. Lancez la reconnaissance "
+                 "de texte pour pouvoir le modifier, le rechercher et le copier.", bg="#fff4ce",
+                 anchor="w", justify="left").pack(side="left", fill="x", expand=True)
+        tk.Button(self.bandeau, text="✕", relief="flat", bg="#fff4ce", bd=0,
+                  command=lambda: self.bandeau.pack_forget()).pack(side="right", padx=(8, 0))
+        ttk.Button(self.bandeau, text="Reconnaître le texte (OCR)", style="Accent.TButton",
+                   command=self.lancer_ocr).pack(side="right")
 
         self.panneaux = ttk.PanedWindow(self, orient="horizontal")
         self.panneaux.pack(fill="both", expand=True)
@@ -739,6 +752,13 @@ class Editeur(Base):
         self._appliquer_mode_zoom()
         self._construire_vignettes()
         self._verifier_polices()
+        self._maj_bandeau()
+
+    def _maj_bandeau(self):
+        if self.doc and scan.pages_a_reconnaitre(self.doc):
+            self.bandeau.pack(side="top", fill="x", before=self.panneaux)
+        else:
+            self.bandeau.pack_forget()
 
     def fermer(self):
         if not self.doc or not self._confirmer_abandon():
@@ -751,6 +771,7 @@ class Editeur(Base):
         self.c_vignettes.delete("all")
         self.image = None
         self.lbl_alerte_polices.config(text="")
+        self.bandeau.pack_forget()
         self._maj_accueil()
         self._maj_etat()
 
@@ -955,6 +976,7 @@ class Editeur(Base):
             self.historique.pop(0)
 
     def _apres_modif(self, structure=False, pages=None):
+        self.__dict__.pop("_cache_scan", None)
         self.modifie = True
         self.page_idx = max(0, min(self.page_idx, self.doc.page_count - 1))
         self.afficher()
@@ -1119,7 +1141,7 @@ class Editeur(Base):
         self.canvas.create_image(0, 0, image=self.image, anchor="nw", tags=("page", "fond"))
         self.mots = page.get_text("words")
         self.spans = [s for b in page.get_text("dict")["blocks"] for l in b.get("lines", []) for s in l["spans"]
-                      if s["text"].strip()]
+                      if s["text"].strip() and s.get("alpha", 255) != 0] + scan.lignes_scannees(page)
         self.selection = []
         self._placer()
         self._dessiner_resultats()
@@ -1379,6 +1401,11 @@ class Editeur(Base):
         o = self.outil.get()
         p = self._vers_page(e.x, e.y)
         self.glisser = (e.x, e.y)
+        if o == "edition" and not self.spans and scan.est_scannee(self.doc[self.page_idx]):
+            if messagebox.askyesno("Page scannée", "Cette page est une image scannée : son texte doit d'abord "
+                                   "être reconnu (OCR) pour être modifié.\n\nLancer la reconnaissance maintenant ?"):
+                self.lancer_ocr()
+            return
         if o == "edition":
             span = self._span_a(p)
             if self.edition and span is self.edition.get("span"):
@@ -1456,7 +1483,11 @@ class Editeur(Base):
         texte = " ".join(m[4] for m in mots)
         r = pymupdf.Rect(mots[0][:4])
         span = max(self.spans, key=lambda s: (pymupdf.Rect(s["bbox"]) & r).get_area(), default=None)
-        if span:
+        if span and span.get("scan"):
+            g = self._analyse_scan(span)
+            self.statut(f"« {texte[:60]} »   —   Texte scanné   Police estimée : {g['libelle']}   "
+                        f"Taille : {g['taille']:.1f} pt   Couleur : {g['couleur']}")
+        elif span:
             gras, ita = pdftool.style_span(span)
             style = " ".join(x for x, ok in (("gras", gras), ("italique", ita)) if ok) or "normal"
             self.statut(f"« {texte[:60]} »   —   Police : {span['font']}   Taille : {span['size']:.1f} pt   "
@@ -1480,21 +1511,49 @@ class Editeur(Base):
         return tkfont.Font(family=famille, size=-px, weight="bold" if gras else "normal",
                            slant="italic" if ita else "roman")
 
+    def _analyse_scan(self, span):
+        """Police, taille et couleurs estimées d'une ligne scannée (mémorisées)."""
+        cle = (self.page_idx, tuple(round(v, 1) for v in span["bbox"]))
+        cache = self.__dict__.setdefault("_cache_scan", {})
+        if cle not in cache:
+            self.config(cursor="watch")
+            self.update_idletasks()
+            page, rect = self.doc[self.page_idx], pymupdf.Rect(span["bbox"])
+            base = scan.ligne_de_base(page, rect) or span["origin"][1]
+            g = scan.deviner_police(page, rect, span["text"], base)
+            fond, encre = scan.couleurs(page, rect)
+            g["couleur"] = "#%02x%02x%02x" % tuple(round(c * 255) for c in encre)
+            g["fond"] = "#%02x%02x%02x" % tuple(round(c * 255) for c in fond)
+            if g["entree"]:
+                g["famille"] = g["entree"]["famille"]
+            else:
+                g["famille"] = {"helv": "Helvetica", "hebo": "Helvetica", "tiro": "Times", "tibo": "Times",
+                                "cour": "Courier", "cobo": "Courier"}.get(g["base14"], "Helvetica")
+            cache[cle] = g
+            self.config(cursor="")
+        return cache[cle]
+
     def _ouvrir_edition(self, span):
-        gras, ita = pdftool.style_span(span)
-        famille = self._famille_affichee(span["font"], gras, ita)
-        couleur = pdftool.couleur_hex(span["color"])
+        if span.get("scan"):
+            g = self._analyse_scan(span)
+            gras, ita, famille, couleur, taille = g["gras"], False, g["famille"], g["couleur"], g["taille"]
+            self.lbl_police_origine.config(text=f"Texte scanné — police estimée : {g['libelle']}")
+            fond = g["fond"]
+        else:
+            gras, ita = pdftool.style_span(span)
+            famille = self._famille_affichee(span["font"], gras, ita)
+            couleur, taille, fond = pdftool.couleur_hex(span["color"]), span["size"], "white"
+            self.lbl_police_origine.config(text=f"Police d'origine : {span['font']}")
         self.var_police.set(famille)
-        self.var_taille.set(f"{span['size']:g}" if span["size"] == int(span["size"]) else f"{span['size']:.1f}")
+        self.var_taille.set(f"{taille:g}" if taille == int(taille) else f"{taille:.1f}")
         self.var_gras.set(gras)
         self.var_italique.set(ita)
         self._regler_couleur(couleur)
-        self.lbl_police_origine.config(text=f"Police d'origine : {span['font']}")
         texte = span["text"]
         x0, y0, x1, y1 = self._vers_canvas(span["bbox"])
-        masque = self.canvas.create_rectangle(x0 - 1, y0 - 1, x1 + 1, y1 + 1, fill="white", outline="", tags="edition")
+        masque = self.canvas.create_rectangle(x0 - 1, y0 - 1, x1 + 1, y1 + 1, fill=fond, outline="", tags="edition")
         e = tk.Entry(self.canvas, relief="solid", bd=1, highlightthickness=1, highlightcolor=BLEU,
-                     font=self._police_tk(famille, span["size"], gras, ita), fg=couleur)
+                     font=self._police_tk(famille, taille, gras, ita), fg=couleur, bg=fond)
         e.insert(0, texte)
         largeur = max(x1 - x0 + 60, 160)
         fen = self.canvas.create_window(x0 - 3, y0 - 3, anchor="nw", window=e, width=largeur, tags="edition")
@@ -1589,7 +1648,10 @@ class Editeur(Base):
             return
         actuel = self._style_courant()
         police_changee = actuel[0] != ed["style"][0] or actuel[2:4] != ed["style"][2:4]
-        style = self._style_pdf(avec_police=police_changee) if style_change else None
+        if ed["span"].get("scan"):
+            style = self._style_pdf(avec_police=True)  # police estimée ou choisie
+        else:
+            style = self._style_pdf(avec_police=police_changee) if style_change else None
         self._avant_modif()
         self.config(cursor="watch")
         self.update_idletasks()
@@ -1723,6 +1785,123 @@ class Editeur(Base):
         page.apply_redactions()
         self._apres_modif()
         self.statut("Zone effacée.")
+
+    # ================================================================ OCR ==
+
+    def lancer_ocr(self, choisir=False):
+        if not self._doc_requis():
+            return
+        self._fermer_edition(valider=True)
+        langues = self.reglages.get("langues_ocr", ["fra", "eng"])
+        pages = scan.pages_a_reconnaitre(self.doc)
+        if choisir or not pages:
+            r = self._dialogue_ocr(langues, bool(pages))
+            if not r:
+                return
+            langues, toutes = r
+            self.reglages["langues_ocr"] = langues
+            self._sauver_reglages()
+            if toutes:
+                pages = [i for i, pg in enumerate(self.doc) if not scan.a_couche_texte_invisible(pg)]
+        if not pages:
+            return messagebox.showinfo("Reconnaissance du texte", "Aucune page scannée à reconnaître.")
+        if scan.langues_manquantes(langues) and not self._telecharger_langues(langues):
+            return
+
+        fen = self._fenetre("Reconnaissance du texte", 420, 130)
+        fen.transient(self)
+        fen.grab_set()
+        lbl = ttk.Label(fen, text="Préparation…", padding=(14, 14, 14, 6))
+        lbl.pack(anchor="w")
+        barre = ttk.Progressbar(fen, maximum=len(pages), length=int(380 * self.echelle_ui))
+        barre.pack(padx=14)
+        self._avant_modif()
+        mots = 0
+        try:
+            for k, i in enumerate(pages):
+                lbl.config(text=f"Lecture de la page {i + 1} ({k + 1} sur {len(pages)})…")
+                barre["value"] = k
+                fen.update()
+                mots += scan.reconnaitre_page(self.doc[i], langues)
+        except Exception as e:
+            fen.destroy()
+            self.annuler()
+            return messagebox.showerror("Reconnaissance du texte", f"La reconnaissance a échoué :\n{e}")
+        fen.destroy()
+        self._apres_modif(pages=pages)
+        self._maj_bandeau()
+        self.statut(f"Texte reconnu : {mots} mots sur {len(pages)} page(s). Vous pouvez maintenant le modifier "
+                    "(outil Modifier), le rechercher et le copier.")
+        self.outil.set("edition")
+
+    def _dialogue_ocr(self, langues, a_scanner):
+        f = self._fenetre("Reconnaissance du texte (OCR)", 420, 330)
+        f.transient(self)
+        f.grab_set()
+        ttk.Label(f, text="Langues du document :", padding=(14, 12, 14, 4)).pack(anchor="w")
+        vars_l = {}
+        cadre = ttk.Frame(f, padding=(20, 0))
+        cadre.pack(fill="x")
+        for k, (nom, code) in enumerate(scan.LANGUES.items()):
+            v = tk.BooleanVar(value=code in langues)
+            vars_l[code] = v
+            ttk.Checkbutton(cadre, text=nom, variable=v).grid(row=k // 2, column=k % 2, sticky="w", padx=(0, 30))
+        var_toutes = tk.BooleanVar(value=not a_scanner)
+        ttk.Checkbutton(f, text="Reconnaître aussi les pages qui contiennent déjà du texte",
+                        variable=var_toutes, padding=(14, 12)).pack(anchor="w")
+        res = {}
+
+        def ok():
+            choix = [c for c, v in vars_l.items() if v.get()]
+            if not choix:
+                return messagebox.showinfo("Langues", "Choisissez au moins une langue.", parent=f)
+            res["r"] = (choix, var_toutes.get())
+            f.destroy()
+        b = ttk.Frame(f, padding=14)
+        b.pack(fill="x", side="bottom")
+        ttk.Button(b, text="Annuler", command=f.destroy).pack(side="right")
+        ttk.Button(b, text="Lancer", style="Accent.TButton", command=ok).pack(side="right", padx=6)
+        self.wait_window(f)
+        return res.get("r")
+
+    def _telecharger_langues(self, langues):
+        if not messagebox.askyesno("Fichiers de langue", "La reconnaissance de texte a besoin des fichiers de "
+                                   "langue (environ 4 à 15 Mo chacun), à télécharger une seule fois.\n\n"
+                                   "Les télécharger maintenant ?"):
+            return False
+        fen = self._fenetre("Téléchargement", 420, 110)
+        fen.transient(self)
+        fen.grab_set()
+        lbl = ttk.Label(fen, text="Connexion…", padding=(14, 14, 14, 6))
+        lbl.pack(anchor="w")
+        barre = ttk.Progressbar(fen, maximum=100, length=int(380 * self.echelle_ui))
+        barre.pack(padx=14)
+        etat = {"fini": False, "erreur": None, "info": None}
+
+        def rappel(code, lus, total):
+            etat["info"] = (code, lus, total)
+
+        def travail():
+            try:
+                scan.telecharger_langues(langues, rappel)
+            except Exception as e:
+                etat["erreur"] = e
+            etat["fini"] = True
+
+        threading.Thread(target=travail, daemon=True).start()
+        while not etat["fini"]:
+            if etat["info"]:
+                code, lus, total = etat["info"]
+                nom = next((n for n, c in scan.LANGUES.items() if c == code), code)
+                lbl.config(text=f"Langue : {nom} — {lus / 1e6:.1f} Mo" + (f" sur {total / 1e6:.1f} Mo" if total else ""))
+                barre["value"] = 100 * lus / total if total else 0
+            fen.update()
+            self.after(100)
+        fen.destroy()
+        if etat["erreur"]:
+            messagebox.showerror("Téléchargement", f"Téléchargement impossible (connexion Internet ?) :\n{etat['erreur']}")
+            return False
+        return True
 
     # ================================================ Rechercher/remplacer ==
 
@@ -2040,6 +2219,8 @@ class Editeur(Base):
             "• Annuler : Ctrl+Z — Rétablir : Ctrl+Y.",
             "• Enregistrer : Ctrl+S — Enregistrer sous : Ctrl+Maj+S.",
             "• Polices manquantes : Outils › Polices du document › Installer.",
+            "• Document scanné : cliquez « Reconnaître le texte (OCR) » dans le bandeau jaune "
+            "(ou Outils › Reconnaître le texte). Le texte devient modifiable comme les autres.",
         ]))
 
 

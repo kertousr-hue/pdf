@@ -11,6 +11,7 @@ Exemples :
     python pdftool.py ajouter-texte document.pdf sortie.pdf --texte "Bonjour" --x 100 --y 700 --pages 1
     python pdftool.py filigrane document.pdf sortie.pdf --texte "CONFIDENTIEL"
     python pdftool.py metadonnees document.pdf sortie.pdf --titre "Mon titre" --auteur "Moi"
+    python pdftool.py ocr scan.pdf sortie.pdf --langues fra+eng
     python pdftool.py chiffrer document.pdf sortie.pdf --mot-de-passe secret
     python pdftool.py dechiffrer protege.pdf sortie.pdf --mot-de-passe secret
 """
@@ -444,6 +445,12 @@ def _remplacer_occurrence(page, rect, nouveau, taille=None, ajuster=False, fichi
         return None
     base = span["origin"][1]
 
+    # Texte d'un document scanné (couche OCR invisible) : on modifie l'image
+    if span.get("alpha", 255) == 0:
+        import scan
+        return scan.remplacer_texte_scanne(page, rect, nouveau, spans, base, style=style,
+                                           decaler=decaler, cache=cache)
+
     fontname = None
     if style.get("entree"):
         fontname = police_installee(page, cache, style["entree"], nouveau)
@@ -567,6 +574,25 @@ def cmd_remplacer(args):
     print(f"{len(resultats)} remplacement(s). Fichier enregistré : {args.sortie}")
 
 
+def cmd_ocr(args):
+    import scan
+    langues = args.langues.split("+")
+    if scan.langues_manquantes(langues):
+        print("Téléchargement des fichiers de langue (une seule fois)…")
+        scan.telecharger_langues(langues)
+    doc = ouvrir_fitz(args.fichier, args.mot_de_passe)
+    pages = parse_pages(args.pages, doc.page_count) if args.pages else scan.pages_a_reconnaitre(doc)
+    if not pages:
+        raise ValueError("Aucune page scannée à reconnaître (utilisez --pages pour forcer)")
+    total = 0
+    for i in pages:
+        n = scan.reconnaitre_page(doc[i], langues)
+        total += n
+        print(f"  page {i + 1} : {n} mots")
+    doc.save(args.sortie, garbage=3, deflate=True)
+    print(f"{total} mots reconnus. Fichier enregistré : {args.sortie}")
+
+
 def cmd_chiffrer(args):
     reader = ouvrir(args.fichier)
     writer = PdfWriter(clone_from=reader)
@@ -687,7 +713,13 @@ def construire_parser():
     sp.add_argument("--ignorer-casse", action="store_true", help="ne pas distinguer majuscules/minuscules")
     sp.set_defaults(func=cmd_remplacer)
 
-    sp = sub.add_parser("chiffrer",help="protéger par mot de passe (AES-256)")
+    sp = sub.add_parser("ocr", help="reconnaître le texte d'un PDF scanné (le rend modifiable et cherchable)")
+    entree_sortie(sp)
+    sp.add_argument("--langues", default="fra+eng", help="ex. fra, fra+eng, deu (défaut : fra+eng)")
+    sp.add_argument("--pages", help="défaut : les pages scannées")
+    sp.set_defaults(func=cmd_ocr)
+
+    sp = sub.add_parser("chiffrer", help="protéger par mot de passe (AES-256)")
     sp.add_argument("fichier")
     sp.add_argument("sortie")
     sp.add_argument("--mot-de-passe", required=True)
