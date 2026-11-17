@@ -37,6 +37,23 @@ Sous macOS ou Linux : `pip install -r requirements.txt`, puis `python pdf_editeu
 | **Autres** | Fusionner, exporter des pages, des images PNG ou le texte, filigrane, numéros de page, propriétés, effacer définitivement une zone, imprimer. |
 | **Annuler / Rétablir** | Ctrl+Z / Ctrl+Y, autant de fois que nécessaire. |
 
+## Numériser un document et le modifier
+
+1. Branchez et allumez votre scanner (ou imprimante multifonction) : il doit être reconnu
+   par Windows.
+2. Cliquez **Numériser** (dans la barre d'outils ou sur l'écran d'accueil), choisissez le
+   scanner, la qualité (**300 ppp conseillé**), les couleurs, et la source :
+   - **Vitre** : une page à la fois, le programme demande s'il faut numériser la suivante ;
+   - **Chargeur** : toutes les feuilles du chargeur d'un coup.
+3. Le programme crée le PDF, **redresse** les pages posées de travers, puis **reconnaît le
+   texte** : l'outil **Modifier** est activé, cliquez sur une ligne pour la changer.
+4. Enregistrez (Ctrl+S).
+
+Si un document est déjà ouvert, les pages numérisées peuvent être ajoutées à la fin.
+L'option « Utiliser la fenêtre du scanner de Windows » affiche l'aperçu de Windows pour
+cadrer la zone à numériser. Pas de scanner ? Photographiez la page avec votre téléphone
+et ouvrez la photo (bouton Ouvrir) : elle est convertie en PDF.
+
 ## Documents scannés
 
 Un PDF scanné ne contient qu'une **image** de la page. À l'ouverture, un bandeau jaune

@@ -20,6 +20,7 @@ import conversion
 import pdftool
 import polices
 import scan
+import scanner
 
 WINDOWS = sys.platform == "win32"
 CTRL = "Command" if sys.platform == "darwin" else "Control"
@@ -77,7 +78,7 @@ _ICONES = {
     "edition": ("\ue70f", "✎"), "texte": ("\ue8d2", "T"), "image": ("\ue91b", "▣"),
     "signature": ("\uee56", "✍"), "surligner": ("\ue7e6", "▌"), "commentaire": ("\ue90a", "✉"),
     "rechercher": ("\ue721", "⌕"), "pivoter": ("\ue7ad", "⟳"), "page": ("\ue7c3", "✚"),
-    "supprimer": ("\ue74d", "✖"), "formulaire": ("\ue73a", "☑"),
+    "supprimer": ("\ue74d", "✖"), "numeriser": ("\ue8fe", "⎙"), "formulaire": ("\ue73a", "☑"),
 }
 ICONES = {k: (v[0] if POLICE_ICONES else v[1]) for k, v in _ICONES.items()}
 
@@ -86,7 +87,7 @@ class BoutonRuban(tk.Frame):
     """Bouton plat façon Windows 11 : icône au-dessus, texte en dessous."""
 
     def __init__(self, parent, icone, texte, commande, police_icone, police_texte):
-        super().__init__(parent, bg=FOND_RUBAN, padx=7, pady=2, highlightthickness=1,
+        super().__init__(parent, bg=FOND_RUBAN, padx=5, pady=2, highlightthickness=1,
                          highlightbackground=FOND_RUBAN, cursor="hand2")
         self.commande, self.actif, self.choisi = commande, True, False
         self.l_icone = tk.Label(self, text=icone, font=police_icone, bg=FOND_RUBAN, fg="#1f1f1f")
@@ -340,6 +341,7 @@ class Editeur(Base):
         m.add_command(label="Ouvrir…", accelerator="Ctrl+O", command=self.demander_ouvrir)
         self.menu_recents = tk.Menu(m, tearoff=False, postcommand=self._remplir_recents)
         m.add_cascade(label="Fichiers récents", menu=self.menu_recents)
+        m.add_command(label="Numériser avec le scanner…", command=self.numeriser)
         m.add_separator()
         m.add_command(label="Enregistrer", accelerator="Ctrl+S", command=self.enregistrer)
         m.add_command(label="Enregistrer sous…", accelerator="Ctrl+Maj+S", command=self.enregistrer_sous)
@@ -423,6 +425,7 @@ class Editeur(Base):
             tk.Frame(r, bg="#d0d0d0", width=1).pack(side="left", fill="y", padx=5, pady=4)
 
         bouton("ouvrir", "Ouvrir", self.demander_ouvrir)
+        bouton("numeriser", "Numériser", self.numeriser)
         self.btn_enregistrer = bouton("enregistrer", "Enregistrer", self.enregistrer)
         bouton("imprimer", "Imprimer", self.imprimer)
         sep()
@@ -441,7 +444,6 @@ class Editeur(Base):
         bouton("rechercher", "Rechercher", self.afficher_recherche)
         sep()
         bouton("pivoter", "Pivoter", lambda: self.pivoter(90))
-        bouton("page", "Ins. page", self.inserer_page_blanche)
         bouton("supprimer", "Suppr. page", self.supprimer_page)
         self.outil.trace_add("write", lambda *_: self._changement_outil())
         self._marquer_outil()
@@ -601,8 +603,12 @@ class Editeur(Base):
         ttk.Label(a, text="PDF Éditeur", style="Titre.TLabel").pack(pady=(30, 6))
         ttk.Label(a, text="Ouvrez un PDF pour le lire, le modifier et l'enregistrer.",
                   style="Accueil.TLabel").pack()
-        ttk.Button(a, text="📂  Ouvrir un fichier PDF…", style="Grand.TButton",
-                   command=self.demander_ouvrir).pack(pady=24)
+        boutons = ttk.Frame(a, style="Accueil.TFrame")
+        boutons.pack(pady=24)
+        ttk.Button(boutons, text="📂  Ouvrir un fichier…", style="Grand.TButton",
+                   command=self.demander_ouvrir).pack(side="left", padx=8)
+        ttk.Button(boutons, text="🖨  Numériser un document…", style="Grand.TButton",
+                   command=self.numeriser).pack(side="left", padx=8)
         if DND_FILES:
             ttk.Label(a, text="ou glissez-déposez un fichier PDF dans cette fenêtre",
                       style="Accueil.TLabel", foreground="#666").pack()
@@ -1860,6 +1866,187 @@ class Editeur(Base):
         self._apres_modif()
         self.statut("Zone effacée.")
 
+    # ========================================================== Numériser ==
+
+    def numeriser(self):
+        """Numérise un document avec le scanner, en fait un PDF, reconnaît le texte et
+        passe en mode modification."""
+        self._fermer_edition(valider=True)
+        r = self._dialogue_numerisation()
+        if not r:
+            return
+        dossier = tempfile.mkdtemp(prefix="PDF_Editeur_scan_")
+        images = []
+        while True:
+            nouvelles = self._numeriser_attente(dossier, r)
+            if nouvelles is None:
+                break
+            images += nouvelles
+            if r["chargeur"] or not messagebox.askyesno(
+                    "Numériser", f"{len(images)} page(s) numérisée(s).\n\n"
+                    "Numériser une autre page ? (posez la feuille suivante sur la vitre)"):
+                break
+        if not images:
+            return
+        self.config(cursor="watch")
+        self.statut("Création du PDF et redressement des pages…")
+        self.update()
+        try:
+            nouveau = scanner.pages_vers_pdf(images, r["dpi"], r["mode"], redresser=r["redresser"])
+        except Exception as e:
+            self.config(cursor="")
+            return messagebox.showerror("Numériser", f"Impossible de créer le PDF :\n{e}")
+        self.config(cursor="")
+
+        ajout = False
+        if self.doc:
+            ajout = messagebox.askyesnocancel(
+                "Numériser", "Ajouter les pages numérisées à la fin du document ouvert ?\n\n"
+                "Oui : ajouter    Non : créer un nouveau document")
+            if ajout is None:
+                return
+            if not ajout and not self._confirmer_abandon():
+                return
+        if ajout:
+            self._avant_modif()
+            debut = self.doc.page_count
+            self.doc.insert_pdf(nouveau)
+            self.page_idx = debut
+            self._apres_modif(structure=True)
+        else:
+            self._fermer_edition(valider=False)
+            self.doc = pymupdf.open(stream=nouveau.tobytes(garbage=3, deflate=True), filetype="pdf")
+            self.chemin, self.modifie = None, True
+            self.nom_suggere = os.path.join(os.path.expanduser("~"), "Documents",
+                                            "Numérisation " + __import__("time").strftime("%Y-%m-%d %H-%M") + ".pdf")
+            self.historique.clear()
+            self.retablir.clear()
+            self.page_idx = 0
+            self.resultats_recherche = []
+            self.accueil.place_forget()
+            self.update_idletasks()
+            self._appliquer_mode_zoom()
+            self._construire_vignettes()
+            self._maj_etat()
+        self.statut(f"{len(images)} page(s) numérisée(s).")
+        if r["ocr"]:
+            self.lancer_ocr()
+        else:
+            self._maj_bandeau()
+
+    def _dialogue_numerisation(self):
+        f = self._fenetre("Numériser un document", 460, 330)
+        f.transient(self)
+        f.grab_set()
+        c = ttk.Frame(f, padding=16)
+        c.pack(fill="both", expand=True)
+        c.columnconfigure(1, weight=1)
+        reg = self.reglages.setdefault("numerisation", {})
+        ttk.Label(c, text="Scanner :").grid(row=0, column=0, sticky="w", pady=4)
+        var_app = tk.StringVar(value="Recherche des scanners…")
+        combo = ttk.Combobox(c, textvariable=var_app, state="readonly", width=34)
+        combo.grid(row=0, column=1, sticky="we", pady=4)
+        appareils = {}
+
+        def charger():
+            try:
+                liste = scanner.lister_scanners()
+            except Exception:
+                liste = []
+            self.after(0, lambda: afficher(liste))
+
+        def afficher(liste):
+            if not combo.winfo_exists():
+                return
+            appareils.clear()
+            appareils.update({nom: ident for ident, nom in liste})
+            noms = list(appareils) or ["(scanner par défaut)"]
+            combo.configure(values=noms)
+            var_app.set(reg.get("appareil") if reg.get("appareil") in noms else noms[0])
+        threading.Thread(target=charger, daemon=True).start()
+
+        champs = {}
+        for ligne, (cle, libelle, valeurs, defaut) in enumerate([
+                ("dpi", "Qualité :", ["150 ppp (brouillon)", "200 ppp", "300 ppp (conseillé)", "400 ppp",
+                                      "600 ppp (très fin)"], "300 ppp (conseillé)"),
+                ("mode", "Couleurs :", list(scanner.MODES), "Couleur"),
+                ("source", "Source :", ["Vitre (page par page)", "Chargeur (plusieurs pages)"],
+                 "Vitre (page par page)")], start=1):
+            ttk.Label(c, text=libelle).grid(row=ligne, column=0, sticky="w", pady=4)
+            v = tk.StringVar(value=reg.get(cle, defaut) if reg.get(cle, defaut) in valeurs else defaut)
+            ttk.Combobox(c, textvariable=v, values=valeurs, state="readonly", width=34).grid(
+                row=ligne, column=1, sticky="we", pady=4)
+            champs[cle] = v
+        options = {}
+        for ligne, (cle, texte, defaut) in enumerate([
+                ("ocr", "Reconnaître le texte pour pouvoir le modifier", True),
+                ("redresser", "Redresser les pages scannées de travers", True),
+                ("fenetre", "Utiliser la fenêtre du scanner de Windows (aperçu, cadrage)", False)], start=4):
+            if cle == "fenetre" and not WINDOWS:
+                continue
+            v = tk.BooleanVar(value=reg.get(cle, defaut))
+            ttk.Checkbutton(c, text=texte, variable=v).grid(row=ligne, column=0, columnspan=2, sticky="w", pady=2)
+            options[cle] = v
+        ttk.Label(c, text="Conseil : posez la feuille bien droite, face à numériser contre la vitre.",
+                  foreground="#666", wraplength=int(410 * self.echelle_ui)).grid(
+            row=8, column=0, columnspan=2, sticky="w", pady=(12, 0))
+        res = {}
+
+        def ok():
+            nom = var_app.get()
+            res.update({
+                "appareil": appareils.get(nom),
+                "dpi": int(champs["dpi"].get().split()[0]),
+                "mode": champs["mode"].get(),
+                "chargeur": champs["source"].get().startswith("Chargeur"),
+                "ocr": options["ocr"].get(), "redresser": options["redresser"].get(),
+                "fenetre": options["fenetre"].get() if "fenetre" in options else False,
+            })
+            reg.update({"appareil": nom, "dpi": champs["dpi"].get(), "mode": champs["mode"].get(),
+                        "source": champs["source"].get(), "ocr": res["ocr"], "redresser": res["redresser"],
+                        "fenetre": res["fenetre"]})
+            self._sauver_reglages()
+            f.destroy()
+        b = ttk.Frame(f, padding=(16, 0, 16, 16))
+        b.pack(fill="x", side="bottom")
+        ttk.Button(b, text="Annuler", command=f.destroy).pack(side="right")
+        ttk.Button(b, text="Numériser", style="Accent.TButton", command=ok).pack(side="right", padx=6)
+        self.wait_window(f)
+        return res or None
+
+    def _numeriser_attente(self, dossier, r):
+        """Lance la numérisation (sans bloquer la fenêtre) ; renvoie les images ou None."""
+        fen = self._fenetre("Numérisation", 380, 110)
+        fen.transient(self)
+        fen.grab_set()
+        ttk.Label(fen, text="Numérisation en cours… patientez.", padding=(14, 16, 14, 8)).pack(anchor="w")
+        barre = ttk.Progressbar(fen, mode="indeterminate", length=int(340 * self.echelle_ui))
+        barre.pack(padx=14)
+        barre.start(15)
+        etat = {}
+
+        def travail():
+            try:
+                etat["images"] = scanner.numeriser(dossier, r["appareil"], r["dpi"], r["mode"],
+                                                   r["chargeur"], r["fenetre"])
+            except Exception as e:
+                etat["erreur"] = e
+
+        t = threading.Thread(target=travail, daemon=True)
+        t.start()
+        while t.is_alive():
+            fen.update()
+            self.after(50)
+        fen.destroy()
+        if "erreur" in etat:
+            e = etat["erreur"]
+            if str(e) != "Numérisation annulée.":
+                messagebox.showerror("Numériser", f"{e}\n\nVous pouvez aussi numériser avec le logiciel de "
+                                     "votre scanner, ou photographier la page avec votre téléphone, puis ouvrir "
+                                     "le fichier ici (bouton Ouvrir).")
+            return None
+        return etat.get("images") or None
+
     # ========================================================== Formulaires ==
 
     def _champs(self):
@@ -2494,6 +2681,8 @@ class Editeur(Base):
             "Édition › Créer un champ pour en ajouter.",
             "• Ouvrir un document Word ou des images : ils sont convertis en PDF automatiquement.",
             "• Exporter en Word : Fichier › Exporter en Word.",
+            "• Numériser : bouton « Numériser » (scanner branché à l'ordinateur). Les pages sont "
+            "redressées, le texte est reconnu, puis vous pouvez le modifier avec l'outil Modifier.",
             "• Document scanné : cliquez « Reconnaître le texte (OCR) » dans le bandeau jaune "
             "(ou Outils › Reconnaître le texte). Le texte devient modifiable comme les autres.",
         ]))
