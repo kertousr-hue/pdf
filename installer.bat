@@ -27,7 +27,7 @@ if errorlevel 1 (
 )
 echo.
 echo  Creation du raccourci sur le Bureau...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$w=New-Object -ComObject WScript.Shell; $s=$w.CreateShortcut([Environment]::GetFolderPath('Desktop')+'\PDF Editeur.lnk'); $s.TargetPath='%~dp0PDF Editeur.pyw'; $s.WorkingDirectory='%~dp0'; $s.Save()"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$w=New-Object -ComObject WScript.Shell; $s=$w.CreateShortcut([Environment]::GetFolderPath('Desktop')+'\PDF Editeur.lnk'); $s.TargetPath='%~dp0PDF Editeur.pyw'; $s.WorkingDirectory='%~dp0'; $s.Save(); $s=$w.CreateShortcut([Environment]::GetFolderPath('Desktop')+'\PDF Editeur (web).lnk'); $s.TargetPath='%~dp0PDF Editeur Web.pyw'; $s.WorkingDirectory='%~dp0'; $s.Save()"
 echo.
 echo  Termine ! Lancez "PDF Editeur" depuis le Bureau
 echo  (ou double-cliquez sur "PDF Editeur.pyw" dans ce dossier).

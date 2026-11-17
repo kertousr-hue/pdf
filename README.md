@@ -18,6 +18,33 @@ Le fichier créé est `dist\PDF Editeur.exe`.
 Sous macOS ou Linux : `pip install -r requirements.txt`, puis `python pdf_editeur.py`
 (sous Linux, il faut aussi installer `python3-tk`).
 
+## Version application web
+
+Le même éditeur existe en **application web**, qui s'utilise dans le navigateur, sur
+ordinateur comme sur téléphone ou tablette.
+
+- **Sur l'ordinateur** : double-cliquez sur **`PDF Editeur Web.pyw`** (ou le raccourci
+  « PDF Editeur (web) » du Bureau créé par `installer.bat`). Le navigateur s'ouvre sur
+  l'éditeur. Pour quitter : menu **Fichier › Quitter PDF Éditeur**.
+- **Sur le téléphone ou la tablette** : sur l'ordinateur, lancez **`lancer_web_telephone.bat`**.
+  Il affiche un lien, du type `http://192.168.1.20:8765/?code=…`, à ouvrir sur le téléphone
+  connecté au **même Wi-Fi**. Le code protège l'accès : ne donnez ce lien qu'à vos appareils.
+  Sur le téléphone, **« Photographier un document »** prend la page en photo, la redresse,
+  lit le texte et le rend modifiable.
+
+Toutes les fonctions de l'éditeur de bureau sont disponibles : modifier le texte, polices,
+documents scannés (OCR), formulaires, signature, surlignage, notes, rechercher et remplacer,
+pages (glisser les miniatures, clic droit), filigrane, numéros de page, export Word et texte,
+téléchargement avec mot de passe, annuler et rétablir. La numérisation avec le scanner
+n'est proposée que sur l'ordinateur où tourne le programme.
+
+En ligne de commande : `python app_web.py` (options `--reseau`, `--port 8765`, `--sans-navigateur`).
+
+**Mettre l'application sur Internet** : le serveur intégré est prévu pour un usage personnel,
+sur votre ordinateur ou votre réseau. Pour la publier sur Internet, il faut un hébergement
+avec un vrai serveur web (par exemple Waitress ou Gunicorn), le HTTPS, et de vrais comptes
+utilisateurs ; demandez-moi si vous voulez aller jusque-là.
+
 ## Ce que fait l'éditeur
 
 | | |

@@ -171,15 +171,21 @@ def angle_inclinaison(pix):
     return float(fin)
 
 
-def pages_vers_pdf(images, dpi=300, mode="Couleur", redresser=True):
-    """Crée un PDF (une page par image, à la taille réelle du papier), pages redressées."""
+def pages_vers_pdf(images, dpi=300, mode="Couleur", redresser=True, largeur_papier=None):
+    """Crée un PDF (une page par image, à la taille réelle du papier), pages redressées.
+
+    largeur_papier (en points, ex. 595 pour A4) : pour les photos, dont la résolution n'a pas
+    de sens, l'image est mise à cette largeur."""
     doc = pymupdf.open()
     for chemin in images:
         pix = pymupdf.Pixmap(chemin)
         if pix.alpha:
             pix = pymupdf.Pixmap(pix, 0)
         # résolution réelle de l'image si elle est indiquée (certains scanners ignorent celle demandée)
-        resolution = pix.xres if pix.xres and pix.xres not in (72, 96) else (dpi or 300)
+        if largeur_papier:
+            resolution = pix.width * 72 / largeur_papier
+        else:
+            resolution = pix.xres if pix.xres and pix.xres not in (72, 96) else (dpi or 300)
         largeur, hauteur = pix.width * 72 / resolution, pix.height * 72 / resolution
         petite = pymupdf.Pixmap(pix, max(1, pix.width // 4), max(1, pix.height // 4), None) \
             if pix.width > 1200 else pix
@@ -195,7 +201,7 @@ def pages_vers_pdf(images, dpi=300, mode="Couleur", redresser=True):
             tour = pymupdf.open()
             q = tour.new_page(width=largeur, height=hauteur)
             q.show_pdf_page(q.rect, tmp, 0, rotate=angle, keep_proportion=False)
-            plate = q.get_pixmap(dpi=resolution, colorspace=pymupdf.csGRAY if noir_blanc else pix.colorspace,
+            plate = q.get_pixmap(dpi=max(1, round(resolution)), colorspace=pymupdf.csGRAY if noir_blanc else pix.colorspace,
                                  alpha=False)
             donnees = plate.tobytes("png") if noir_blanc else plate.tobytes("jpeg", jpg_quality=85)
         page.insert_image(page.rect, stream=donnees)
