@@ -245,6 +245,8 @@ class Editeur(Base):
         largeur, hauteur = self.winfo_screenwidth(), self.winfo_screenheight()
         self.geometry(f"{int(largeur * 0.8)}x{int(hauteur * 0.82)}+{int(largeur * 0.1)}+{int(hauteur * 0.05)}")
         self.minsize(int(900 * self.echelle_ui), int(560 * self.echelle_ui))
+        if WINDOWS:
+            self.state("zoomed")  # plein écran : toute la barre d'outils est visible
 
         self.config_chemin = os.path.join(polices.dossier_app(), "config.json")
         self.reglages = {"recents": [], "telecharger": True, "installer_windows": True, "zoom": "Largeur"}

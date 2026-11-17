@@ -1,0 +1,44 @@
+name: Installateur Windows
+
+# Construit le programme d'installation de PDF Éditeur sur une machine Windows,
+# le vérifie, puis le publie dans la page « Releases » du dépôt (version « installateur »).
+on:
+  push:
+    branches: ["claude/jolly-heisenberg-ykzrls", "main"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Inno Setup
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+
+      - name: Construire et vérifier
+        run: .\installateur\construire.ps1
+
+      - name: Garder l'installateur (artefact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: PDF-Editeur-Installation
+          path: dist/PDF-Editeur-Installation-*.exe
+
+      - name: Publier dans les Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $f = Get-ChildItem "dist\PDF-Editeur-Installation-*.exe" | Select-Object -First 1
+          gh release delete installateur --yes --cleanup-tag 2>$null
+          $notes = "Téléchargez le fichier .exe ci-dessous, puis double-cliquez dessus pour installer PDF Éditeur. Version construite depuis la branche $env:GITHUB_REF_NAME."
+          gh release create installateur "$($f.FullName)" --title "PDF Éditeur pour Windows (installation)" --notes $notes --prerelease --target $env:GITHUB_SHA

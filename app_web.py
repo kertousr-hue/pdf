@@ -43,6 +43,7 @@ app.config["MAX_CONTENT_LENGTH"] = TAILLE_MAX_ENVOI
 VERROU = threading.RLock()  # PyMuPDF n'est pas prévu pour plusieurs fils en même temps
 SESSIONS = {}
 CODE_ACCES = None  # défini avec --reseau
+LIEN_RESEAU = None  # adresse à ouvrir sur le téléphone (avec le code)
 
 
 # --------------------------------------------------------------------------- #
@@ -211,6 +212,7 @@ def fichiers_web(nom):
 @app.get("/api/config")
 def config():
     return jsonify({"local": _est_local(), "scanner": _est_local(),
+                    "reseau": bool(LIEN_RESEAU) and _est_local(),
                     "langues": scan.LANGUES, "polices_pretes": polices.INDEX.pret.is_set()})
 
 
@@ -762,6 +764,23 @@ def ocr(ident):
     return _modif(ident, action)
 
 
+@app.get("/api/reseau")
+def reseau():
+    """Lien et QR code pour ouvrir l'éditeur sur le téléphone (seulement depuis cet ordinateur)."""
+    if not _est_local() or not LIEN_RESEAU:
+        abort(404)
+    svg = None
+    try:
+        import qrcode
+        import qrcode.image.svg
+        tampon = io.BytesIO()
+        qrcode.make(LIEN_RESEAU, image_factory=qrcode.image.svg.SvgPathImage, box_size=8, border=2).save(tampon)
+        svg = tampon.getvalue().decode("utf-8")
+    except Exception:
+        pass
+    return jsonify({"lien": LIEN_RESEAU, "qr": svg})
+
+
 @app.post("/api/arreter")
 def arreter():
     """Arrête le serveur (seulement depuis l'ordinateur où il tourne)."""
@@ -813,8 +832,13 @@ def _ip_locale():
         return "127.0.0.1"
 
 
+def _port_occupe(port):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as so:
+        return so.connect_ex(("127.0.0.1", port)) == 0
+
+
 def main():
-    global CODE_ACCES
+    global CODE_ACCES, LIEN_RESEAU
     ap = argparse.ArgumentParser(description="PDF Éditeur — application web")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--reseau", action="store_true",
@@ -822,6 +846,9 @@ def main():
     ap.add_argument("--sans-navigateur", action="store_true", help="ne pas ouvrir le navigateur")
     args = ap.parse_args()
 
+    if _port_occupe(args.port):  # déjà ouvert : on montre simplement l'éditeur existant
+        webbrowser.open(f"http://127.0.0.1:{args.port}/")
+        return 0
     polices.INDEX.charger(en_arriere_plan=True)
     threading.Thread(target=_nettoyer, daemon=True).start()
     hote = "0.0.0.0" if args.reseau else "127.0.0.1"
@@ -830,7 +857,8 @@ def main():
     print(f"  Sur cet ordinateur : {adresse}")
     if args.reseau:
         CODE_ACCES = secrets.token_urlsafe(8)
-        print(f"  Depuis un téléphone ou une tablette (même Wi-Fi) : http://{_ip_locale()}:{args.port}/?code={CODE_ACCES}")
+        LIEN_RESEAU = f"http://{_ip_locale()}:{args.port}/?code={CODE_ACCES}"
+        print(f"  Depuis un téléphone ou une tablette (même Wi-Fi) : {LIEN_RESEAU}")
         print("  (le code protège l'accès : ne partagez ce lien qu'avec vos appareils)")
     print("Laissez cette fenêtre ouverte. Pour arrêter : Ctrl+C.")
     if not args.sans_navigateur:

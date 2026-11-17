@@ -40,8 +40,24 @@ def dossier_tessdata():
     return d
 
 
+def _tessdata_fourni():
+    """Fichiers de langue livrés avec le programme installé (dossier « tessdata » à côté)."""
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "tessdata")
+
+
 def langues_manquantes(codes):
-    return [c for c in codes if not os.path.isfile(os.path.join(dossier_tessdata(), f"{c}.traineddata"))]
+    manquantes = []
+    for c in codes:
+        dest = os.path.join(dossier_tessdata(), f"{c}.traineddata")
+        if os.path.isfile(dest):
+            continue
+        fourni = os.path.join(_tessdata_fourni(), f"{c}.traineddata")
+        if os.path.isfile(fourni):  # langue livrée avec le programme : pas de téléchargement
+            import shutil
+            shutil.copyfile(fourni, dest)
+            continue
+        manquantes.append(c)
+    return manquantes
 
 
 def telecharger_langues(codes, rappel=None):
@@ -101,6 +117,9 @@ def pages_a_reconnaitre(doc):
 
 def reconnaitre_page(page, langues=("fra", "eng"), dpi=300):
     """OCR d'une page : ajoute le texte reconnu de façon invisible. Renvoie le nombre de mots."""
+    manquantes = langues_manquantes(langues)  # copie aussi les langues livrées avec le programme
+    if manquantes:
+        telecharger_langues(manquantes)
     tp = page.get_textpage_ocr(flags=0, language="+".join(langues), dpi=dpi, full=True,
                                tessdata=dossier_tessdata())
     police = pymupdf.Font("helv")

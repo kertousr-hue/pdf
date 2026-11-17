@@ -971,6 +971,7 @@ const ACTIONS = {
     document.title = "PDF Éditeur";
     majEtat();
   },
+  telephone: () => montrerLienTelephone(),
   arreter: async () => {
     if (!(await confirmerAbandon())) return;
     if (!(await confirmer("Quitter", "Arrêter PDF Éditeur ? Les documents ouverts seront fermés.", "Quitter", "Annuler"))) return;
@@ -1035,7 +1036,7 @@ document.addEventListener("click", (e) => {
     return choisirOutil(b.dataset.outil);
   }
   const action = ACTIONS[b.dataset.action];
-  if (action && (etat.doc || ["ouvrir", "photo", "numeriser", "aide", "arreter"].includes(b.dataset.action))) action();
+  if (action && (etat.doc || ["ouvrir", "photo", "numeriser", "aide", "arreter", "telephone"].includes(b.dataset.action))) action();
 });
 
 // fichiers choisis
@@ -1142,6 +1143,26 @@ document.addEventListener("keydown", (e) => {
 
 window.addEventListener("beforeunload", (e) => { if (etat.doc && etat.modifie) { e.preventDefault(); e.returnValue = ""; } });
 
+async function montrerLienTelephone() {
+  if (!etat.config.reseau) {
+    return alerte("Utiliser sur le téléphone",
+      "Pour ouvrir l'éditeur sur votre téléphone, fermez PDF Éditeur (Fichier › Quitter) puis lancez " +
+      "« PDF Éditeur sur le téléphone » depuis le menu Démarrer.");
+  }
+  try {
+    const r = await api("/api/reseau");
+    await formulaire("Ouvrir sur le téléphone", [{
+      type: "info",
+      html: `<p>Avec le téléphone connecté au <b>même Wi-Fi</b> que cet ordinateur, scannez ce code avec l'appareil photo :</p>
+        ${r.qr ? `<div style="display:flex;justify-content:center;margin:8px 0">${r.qr.replace(/<\?xml[^>]*>/, "")}</div>` : ""}
+        <p>ou tapez cette adresse dans le navigateur du téléphone :</p>
+        <p style="word-break:break-all;font-family:monospace;background:#f3f3f3;padding:8px;border-radius:4px">${echapper(r.lien)}</p>
+        <p class="discret">Le code dans l'adresse protège l'accès : ne la donnez qu'à vos appareils.
+        Si rien ne s'ouvre, autorisez PDF Éditeur dans le pare-feu de Windows (réseaux privés).</p>`,
+    }], { annuler: "" });
+  } catch (e) { alerte("Erreur", e.message); }
+}
+
 // démarrage
 (async function demarrer() {
   try { etat.config = await api("/api/config"); } catch (_) { etat.config = {}; }
@@ -1151,4 +1172,5 @@ window.addEventListener("beforeunload", (e) => { if (etat.doc && etat.modifie) {
   chargerPolices();
   setTimeout(chargerPolices, 8000); // la liste complète peut être prête un peu plus tard
   majEtat();
+  if (etat.config.reseau) montrerLienTelephone(); // lancé « sur le téléphone » : on montre le lien tout de suite
 })();

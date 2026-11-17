@@ -3,20 +3,38 @@
 Programme pour **ouvrir, modifier et enregistrer des PDF**, comme dans Adobe Acrobat, avec
 une interface simple pensée pour Windows. Il comprend aussi un outil en ligne de commande.
 
-## Installation sous Windows
+## Installation sous Windows (le plus simple)
 
-1. Installez Python depuis <https://www.python.org/downloads/>.
-   Pendant l'installation, cochez **« Add python.exe to PATH »**.
-2. Double-cliquez sur **`installer.bat`**. Il installe les modules nécessaires et crée un
-   raccourci **PDF Éditeur** sur le Bureau.
-3. Lancez **PDF Éditeur** depuis le Bureau, ou double-cliquez sur `PDF Editeur.pyw`.
+1. Ouvrez la page **Releases** du dépôt :
+   <https://github.com/kertousr-hue/pdf/releases/tag/installateur>
+2. Téléchargez le fichier **`PDF-Editeur-Installation-….exe`**.
+3. Double-cliquez dessus et suivez les étapes. Pas besoin de Python ni de droits
+   administrateur. Windows SmartScreen peut afficher « Windows a protégé votre ordinateur »
+   car le programme n'est pas signé : cliquez **Informations complémentaires › Exécuter quand même**.
 
-Pour obtenir un vrai programme `.exe` qui fonctionne sans Python (à copier sur un autre PC,
-ou à choisir dans « Ouvrir avec » pour vos PDF), double-cliquez sur **`creer_exe.bat`**.
-Le fichier créé est `dist\PDF Editeur.exe`.
+Le programme s'installe avec :
+- **PDF Éditeur** (menu Démarrer et Bureau) : l'éditeur de bureau ;
+- **PDF Éditeur (navigateur)** : la même chose dans le navigateur ;
+- **PDF Éditeur sur le téléphone** : affiche un QR code à scanner avec le téléphone (même Wi-Fi) ;
+- **« Ouvrir avec › PDF Éditeur »** sur les fichiers PDF et Word ; pour en faire le programme
+  par défaut : clic droit sur un PDF › Ouvrir avec › Choisir une autre application ›
+  PDF Éditeur › Toujours ;
+- la reconnaissance de texte en français et en anglais, utilisable sans Internet.
 
+Pour désinstaller : Paramètres Windows › Applications › PDF Éditeur › Désinstaller.
+Vos réglages et les polices ajoutées restent dans `%APPDATA%\PDF Editeur`.
+
+L'installateur est fabriqué automatiquement par GitHub (fichier
+`.github/workflows/installateur.yml`) à chaque mise à jour du programme. Pour le fabriquer
+vous-même sur un PC Windows : installez Python 3.12 et Inno Setup 6, puis double-cliquez sur
+**`creer_installateur.bat`** (le résultat est dans le dossier `dist`).
+
+### Installation pour développeurs
+
+Avec Python déjà installé (en cochant « Add python.exe to PATH ») : double-cliquez sur
+**`installer.bat`**, qui installe les modules et crée des raccourcis vers les scripts.
 Sous macOS ou Linux : `pip install -r requirements.txt`, puis `python pdf_editeur.py`
-(sous Linux, il faut aussi installer `python3-tk`).
+(sous Linux, il faut aussi `python3-tk`).
 
 ## Version application web
 
