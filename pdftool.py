@@ -21,9 +21,12 @@ import io
 import os
 import sys
 
-from pypdf import PdfReader, PdfWriter
-from reportlab.lib.colors import Color
-from reportlab.pdfgen import canvas
+try:
+    from pypdf import PdfReader, PdfWriter
+    from reportlab.lib.colors import Color
+    from reportlab.pdfgen import canvas
+except ImportError:  # version navigateur (PWA) : seules les fonctions PyMuPDF y servent
+    PdfReader = PdfWriter = Color = canvas = None
 
 
 # --------------------------------------------------------------------------- #

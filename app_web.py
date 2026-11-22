@@ -20,7 +20,6 @@ import tempfile
 import threading
 import time
 import uuid
-import webbrowser
 
 import pymupdf
 from flask import Flask, abort, jsonify, make_response, request, send_file, send_from_directory
@@ -34,6 +33,7 @@ import scanner
 ICI = os.path.dirname(os.path.abspath(__file__))
 WEB = os.path.join(ICI, "web")
 POLICES_STANDARD = ["Helvetica", "Times", "Courier"]
+PWA = sys.platform == "emscripten"  # moteur exécuté dans le navigateur (application installable)
 MAX_HISTORIQUE_OCTETS = 300 * 1024 * 1024
 DUREE_SESSION = 4 * 3600
 TAILLE_MAX_ENVOI = 200 * 1024 * 1024
@@ -211,9 +211,9 @@ def fichiers_web(nom):
 
 @app.get("/api/config")
 def config():
-    return jsonify({"local": _est_local(), "scanner": _est_local(),
+    return jsonify({"local": _est_local() and not PWA, "scanner": _est_local() and not PWA, "pwa": PWA,
                     "reseau": bool(LIEN_RESEAU) and _est_local(),
-                    "langues": scan.LANGUES, "polices_pretes": polices.INDEX.pret.is_set()})
+                    "langues": {"Français": "fra", "Anglais": "eng"} if PWA else scan.LANGUES, "polices_pretes": polices.INDEX.pret.is_set()})
 
 
 @app.get("/api/polices")
@@ -790,6 +790,31 @@ def arreter():
     return jsonify({"ok": True})
 
 
+@app.post("/api/doc/<ident>/ocr_mots")
+def ocr_mots(ident):
+    """Mots reconnus dans le navigateur (Tesseract.js), posés de façon invisible sur la page.
+    Corps : {"pages": [{"page": n, "mots": [{"texte", "bbox": [x0, y0, x1, y1], "base": y, "taille": t}]}]}
+    en points, dans le sens d'affichage de la page."""
+    d = request.get_json()
+
+    def action(s):
+        total, pages_ = 0, 0
+        for entree in d.get("pages", []):
+            page = s.doc[int(entree["page"])]
+            mots = []
+            for m in entree.get("mots", []):
+                r = _vers_page(page, m["bbox"])
+                base = _point_page(page, m["bbox"][0], m["base"])
+                y_base = base.y if page.rotation in (0, 180) else r.y1
+                mots.append({"text": m["texte"], "bbox": tuple(r), "origin": (r.x0, y_base),
+                             "size": float(m["taille"])})
+            n = scan.inserer_mots(page, mots)
+            total += n
+            pages_ += 1 if n else 0
+        return {"mots": total, "pages": pages_} if total else False
+    return _modif(ident, action)
+
+
 @app.get("/api/scanners")
 def scanners():
     if not _est_local():
@@ -838,6 +863,7 @@ def _port_occupe(port):
 
 
 def main():
+    import webbrowser
     global CODE_ACCES, LIEN_RESEAU
     ap = argparse.ArgumentParser(description="PDF Éditeur — application web")
     ap.add_argument("--port", type=int, default=8765)

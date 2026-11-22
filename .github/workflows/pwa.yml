@@ -1,0 +1,53 @@
+name: PWA (application installable)
+
+# Construit la PWA (pwa/construire.py) et la publie sur GitHub Pages, en HTTPS :
+# https://kertousr-hue.github.io/pdf/
+on:
+  push:
+    branches: ["claude/jolly-heisenberg-ykzrls", "main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  construire:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Outils de construction
+        run: pip install pymupdf fonttools
+
+      - name: Construire la PWA
+        run: python pwa/construire.py
+
+      - name: Activer GitHub Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  publier:
+    needs: construire
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.publication.outputs.page_url }}
+    steps:
+      - id: publication
+        uses: actions/deploy-pages@v4

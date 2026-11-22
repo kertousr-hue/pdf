@@ -371,6 +371,17 @@ class IndexPolices:
 
 
 def _http(url, delai):
+    if sys.platform == "emscripten":
+        # dans le navigateur (PWA) : pas de connexion directe, on passe par une requête du navigateur
+        # (synchrone, autorisée dans un Web Worker)
+        from js import Uint8Array, XMLHttpRequest
+        xhr = XMLHttpRequest.new()
+        xhr.open("GET", url, False)
+        xhr.responseType = "arraybuffer"
+        xhr.send(None)
+        if xhr.status != 200:
+            raise urllib.error.HTTPError(url, xhr.status or 599, "erreur réseau", None, None)
+        return Uint8Array.new(xhr.response).to_py().tobytes()
     req = urllib.request.Request(url, headers={"User-Agent": "pdf-editeur"})
     with urllib.request.urlopen(req, timeout=delai) as r:
         return r.read()

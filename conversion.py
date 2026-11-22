@@ -75,6 +75,10 @@ def _word_windows(source, dest):
 
 def word_vers_pdf(chemin):
     """Convertit un document Word (ou .odt, .rtf, .txt) en PDF. Renvoie les octets du PDF."""
+    if sys.platform == "emscripten":
+        raise RuntimeError("L'ouverture des documents Word n'est pas possible dans l'application du "
+                           "navigateur. Enregistrez le document en PDF depuis Word, ou utilisez la "
+                           "version Windows de PDF Éditeur.")
     source = os.path.abspath(chemin)
     if "'" in source and WINDOWS:
         raise ValueError("Le nom du fichier contient une apostrophe : renommez-le puis réessayez.")
@@ -113,6 +117,9 @@ def word_vers_pdf(chemin):
 
 def pdf_vers_word(chemin_pdf, chemin_docx, pages=None, rappel=None):
     """Convertit un PDF en document Word modifiable (.docx)."""
+    if sys.platform == "emscripten":
+        raise RuntimeError("L'export en Word n'est pas disponible dans l'application du navigateur. "
+                           "Utilisez la version Windows de PDF Éditeur.")
     try:
         from pdf2docx import Converter
     except ImportError:

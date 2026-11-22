@@ -36,6 +36,34 @@ Avec Python déjà installé (en cochant « Add python.exe to PATH ») : double-
 Sous macOS ou Linux : `pip install -r requirements.txt`, puis `python pdf_editeur.py`
 (sous Linux, il faut aussi `python3-tk`).
 
+## Application installable (PWA) : téléphone, tablette, ordinateur
+
+**Adresse : <https://kertousr-hue.github.io/pdf/>**
+
+Ouvrez cette adresse dans Chrome, Edge ou Safari, puis installez l'application :
+- **Android** (Chrome) : bouton « Installer l'application » sur l'accueil, ou menu ⋮ ›
+  « Installer l'application » ;
+- **iPhone / iPad** (Safari) : bouton Partager › « Sur l'écran d'accueil » ;
+- **ordinateur** (Chrome, Edge) : icône d'installation dans la barre d'adresse, ou le bouton
+  « Installer l'application ».
+
+Elle s'ouvre ensuite comme une application, **même sans Internet**. Le premier lancement
+télécharge environ 45 Mo ; les suivants prennent quelques secondes. **Vos documents ne
+quittent jamais l'appareil** : tout le traitement se fait dans le navigateur (le moteur Python
+de PDF Éditeur tourne dans la page grâce à Pyodide ; la reconnaissance de texte utilise
+Tesseract.js).
+
+Fonctions : les mêmes que la version web (modifier le texte, polices, documents scannés et
+photos avec reconnaissance du texte en français et en anglais, formulaires, signature,
+annotations, pages, rechercher et remplacer, filigrane, téléchargement avec mot de passe…).
+Non disponibles dans la PWA : ouvrir des documents Word, exporter en Word, le scanner,
+le redressement automatique des photos (utilisez la version Windows pour cela).
+
+La PWA est reconstruite et republiée automatiquement à chaque mise à jour du programme
+(`.github/workflows/pwa.yml`). Pour la construire soi-même :
+`pip install pymupdf fonttools`, puis `python pwa/construire.py --servir` (le résultat est
+dans `site/`, à héberger en HTTPS).
+
 ## Version application web
 
 Le même éditeur existe en **application web**, qui s'utilise dans le navigateur, sur

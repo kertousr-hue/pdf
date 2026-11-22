@@ -24,7 +24,7 @@ NOM_POLICE_OCR = "OCRTX"
 FAMILLES_CANDIDATES = [
     "Arial", "Times New Roman", "Calibri", "Cambria", "Verdana", "Georgia", "Tahoma", "Segoe UI",
     "Trebuchet MS", "Century Gothic", "Garamond", "Book Antiqua", "Courier New", "Roboto", "Open Sans",
-    "Liberation Sans", "Liberation Serif", "Liberation Mono", "Carlito", "Caladea",
+    "Liberation Sans", "Liberation Serif", "Liberation Mono", "Carlito", "Caladea", "Arimo", "Tinos", "Cousine",
     "DejaVu Sans", "DejaVu Serif",
 ]
 STANDARD = [("Helvetica", "helv", "hebo"), ("Times", "tiro", "tibo"), ("Courier", "cour", "cobo")]
@@ -122,12 +122,23 @@ def reconnaitre_page(page, langues=("fra", "eng"), dpi=300):
         telecharger_langues(manquantes)
     tp = page.get_textpage_ocr(flags=0, language="+".join(langues), dpi=dpi, full=True,
                                tessdata=dossier_tessdata())
+    mots = [{"text": s["text"], "bbox": s["bbox"], "origin": s["origin"], "size": s["size"]}
+            for b in page.get_text("dict", textpage=tp)["blocks"] for l in b.get("lines", [])
+            for s in l["spans"] if s["text"].strip()]
+    return inserer_mots(page, mots)
+
+
+def inserer_mots(page, mots):
+    """Pose de façon invisible des mots reconnus par un OCR (le moteur intégré, ou Tesseract.js
+    dans le navigateur). mots : [{"text", "bbox", "origin" (x, y de la ligne de base), "size"}]
+    en coordonnées de la page non pivotée. Renvoie le nombre de mots posés."""
+    mots = [m for m in mots if m["text"].strip()]
+    if not mots:
+        return 0
     police = pymupdf.Font("helv")
     page.insert_font(fontname=NOM_POLICE_OCR, fontbuffer=police.buffer)
     # Mots regroupés par ligne : même ligne de base et même taille, pour que le texte se lise
     # (et se recherche) comme une vraie ligne
-    mots = [s for b in page.get_text("dict", textpage=tp)["blocks"] for l in b.get("lines", [])
-            for s in l["spans"] if s["text"].strip()]
     mots.sort(key=lambda s: (s["origin"][1], s["bbox"][0]))
     lignes = []
     for s in mots:
@@ -305,7 +316,7 @@ def deviner_police(page, rect, texte, ligne_base):
     comparé à l'image (superposition des pixels et hauteur des lettres).
     Renvoie {"libelle", "entree", "base14", "taille", "gras", "score"}.
     """
-    texte = texte.strip()
+    texte = " ".join(texte.split())  # un texte lu dans une zone peut contenir des retours à la ligne
     zone = zone_encre(rect) & page.rect
     dpi = 200
     original = _encre(page.get_pixmap(clip=zone, dpi=dpi, colorspace=pymupdf.csGRAY, alpha=False))
@@ -367,7 +378,7 @@ def remplacer_texte_scanne(page, rect, nouveau, spans, ligne_base, style=None, d
     import pdftool
     style = style or {}
     cache = {} if cache is None else cache
-    ancien = page.get_text("text", clip=rect).strip() or nouveau
+    ancien = " ".join(page.get_text("text", clip=rect).split()) or nouveau
     fond, encre = couleurs(page, rect)
     ligne = next((l for l in lignes_scannees(page)
                   if pymupdf.Rect(l["bbox"]).intersects(rect) and abs(l["origin"][1] - ligne_base) < 2), None)

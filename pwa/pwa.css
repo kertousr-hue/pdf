@@ -1,0 +1,10 @@
+/* PDF Éditeur (PWA) — écran de premier chargement */
+#chargement-pwa { position: fixed; inset: 0; z-index: 200; display: flex; align-items: center; justify-content: center;
+  background: var(--fond, #f3f3f3); padding: 20px; }
+.carte-chargement { text-align: center; max-width: 420px; }
+.carte-chargement h1 { font-size: 26px; margin: 12px 0 6px; }
+.carte-chargement .barre { height: 6px; background: #dde6f3; border-radius: 3px; overflow: hidden; margin: 14px 0; }
+#chargement-barre { height: 100%; width: 3%; background: var(--accent, #1a73e8); transition: width .4s ease; }
+@media (prefers-reduced-motion: reduce) { #chargement-barre { transition: none; } }
+/* application installée : pas de marge pour la barre d'adresse */
+@media (display-mode: standalone) { body { overscroll-behavior: none; } }

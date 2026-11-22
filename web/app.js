@@ -32,6 +32,22 @@ const etat = {
 
 function statut(t) { $("#statut").textContent = t; }
 
+// Application installable (PWA) : le « serveur » est le moteur Python qui tourne dans le navigateur.
+const PWA = window.MOTEUR_PWA || null;
+const transport = (url, options) => (PWA ? PWA.requete(url, options) : fetch(url, options));
+
+/** Affiche une image du document (page ou miniature). En PWA, elle est produite par le moteur local. */
+const imagesEnCours = new WeakMap();
+async function afficherImage(img, url) {
+  if (!PWA) { img.src = url; return; }
+  imagesEnCours.set(img, url);
+  const blob = await (await transport(url)).blob();
+  if (imagesEnCours.get(img) !== url) return; // une image plus récente a été demandée entre-temps
+  if (img.dataset.blob) URL.revokeObjectURL(img.dataset.blob);
+  img.dataset.blob = URL.createObjectURL(blob);
+  img.src = img.dataset.blob;
+}
+
 function attente(texte) {
   if (texte === false) { $("#attente").hidden = true; return; }
   $("#attente-texte").textContent = texte || "Patientez…";
@@ -48,7 +64,7 @@ async function api(url, options = {}, texteAttente = null) {
       o.body = JSON.stringify(o.json);
       delete o.json;
     }
-    const r = await fetch(url, o);
+    const r = await transport(url, o);
     const type = r.headers.get("Content-Type") || "";
     const donnees = type.includes("json") ? await r.json() : await r.blob();
     if (!r.ok) throw new Error((donnees && donnees.erreur) || `Erreur ${r.status}`);
@@ -151,7 +167,7 @@ async function ouvrirFichiers(fichiers) {
   await essayer(async () => {
     const infos = await envoyerFichiers(fichiers);
     if (!infos) return;
-    if (etat.doc) fetch(urlDoc(), { method: "DELETE" });
+    if (etat.doc) transport(urlDoc(), { method: "DELETE" });
     etat.doc = null;
     etat.page = 0;
     etat.modifie = [...fichiers].some((f) => !/\.pdf$/i.test(f.name));
@@ -249,7 +265,7 @@ async function afficherPage() {
   f.style.height = `${p.h * etat.echelle}px`;
   const resolution = etat.echelle * (window.devicePixelRatio || 1);
   const img = $("#image-page");
-  img.src = urlDoc(`/page/${etat.page}.png?e=${resolution.toFixed(3)}&v=${etat.doc.version}`);
+  afficherImage(img, urlDoc(`/page/${etat.page}.png?e=${resolution.toFixed(3)}&v=${etat.doc.version}`));
   $("#p-num").value = etat.page + 1;
   $$(".vignette").forEach((v, i) => v.classList.toggle("active", i === etat.page));
   const v = $$(".vignette")[etat.page];
@@ -323,7 +339,8 @@ function construireVignettes() {
     const v = document.createElement("div");
     v.className = "vignette" + (i === etat.page ? " active" : "");
     v.draggable = true;
-    v.innerHTML = `<img loading="lazy" alt="Page ${i + 1}" style="aspect-ratio:${p.l}/${p.h}" src="${urlVignette(i)}"><div class="num">${i + 1}</div>`;
+    v.innerHTML = `<img loading="lazy" alt="Page ${i + 1}" style="aspect-ratio:${p.l}/${p.h}" ${PWA ? "" : `src="${urlVignette(i)}"`}><div class="num">${i + 1}</div>`;
+    if (PWA) observateurVignettes.observe(v.querySelector("img"));
     v.addEventListener("click", () => allerPage(i));
     v.addEventListener("contextmenu", (e) => { e.preventDefault(); allerPage(i); menuPage(e.clientX, e.clientY, i); });
     v.addEventListener("dragstart", (e) => { e.dataTransfer.setData("text/x-page", String(i)); });
@@ -338,9 +355,19 @@ function construireVignettes() {
   });
 }
 
+// PWA : les miniatures ne sont fabriquées que lorsqu'elles deviennent visibles
+const observateurVignettes = new IntersectionObserver((entrees) => {
+  for (const e of entrees) {
+    if (!e.isIntersecting || !etat.doc) continue;
+    observateurVignettes.unobserve(e.target);
+    const i = $$(".vignette img").indexOf(e.target);
+    if (i >= 0) afficherImage(e.target, urlVignette(i));
+  }
+}, { root: $("#vignettes"), rootMargin: "200px" });
+
 function majVignettes(pages) {
   const vs = $$(".vignette img");
-  for (const i of pages) if (vs[i]) vs[i].src = urlVignette(i);
+  for (const i of pages) if (vs[i]) afficherImage(vs[i], urlVignette(i));
 }
 
 function menuPage(x, y, i) {
@@ -865,8 +892,15 @@ async function lancerOcr(choisir) {
     localStorage.setItem("langues", JSON.stringify(langues));
   }
   await essayer(async () => {
-    const infos = await api(urlDoc("/ocr"), { json: { langues, toutes } },
-      "Lecture du texte de la page… (la première fois, les fichiers de langue sont téléchargés)");
+    let infos;
+    if (PWA) {
+      // PWA : lecture dans le navigateur (Tesseract.js), puis le moteur pose le texte sur les pages
+      const pages = toutes ? etat.doc.pages.map((_, i) => i) : etat.doc.scannees;
+      try { infos = await PWA.ocr(etat.doc.id, pages, langues, attente); } finally { attente(false); }
+    } else {
+      infos = await api(urlDoc("/ocr"), { json: { langues, toutes } },
+        "Lecture du texte de la page… (la première fois, les fichiers de langue sont téléchargés)");
+    }
     majDocument(infos, "toutes");
     const r = infos.resultat;
     if (r) choisirOutil("edition");
@@ -965,7 +999,7 @@ const ACTIONS = {
   },
   fermer: async () => {
     if (!etat.doc || !(await confirmerAbandon())) return;
-    fetch(urlDoc(), { method: "DELETE" });
+    transport(urlDoc(), { method: "DELETE" });
     etat.doc = null; etat.modifie = false;
     $("#feuille").hidden = true; $("#vignettes").innerHTML = ""; $("#accueil").hidden = false; $("#bandeau").hidden = true;
     document.title = "PDF Éditeur";
@@ -1173,4 +1207,10 @@ async function montrerLienTelephone() {
   setTimeout(chargerPolices, 8000); // la liste complète peut être prête un peu plus tard
   majEtat();
   if (etat.config.reseau) montrerLienTelephone(); // lancé « sur le téléphone » : on montre le lien tout de suite
+  // application installée : PDF ouvert depuis l'explorateur de fichiers (« Ouvrir avec »)
+  if ("launchQueue" in window) {
+    window.launchQueue.setConsumer(async (p) => {
+      if (p.files && p.files.length) ouvrirFichiers(await Promise.all(p.files.map((h) => h.getFile())));
+    });
+  }
 })();
