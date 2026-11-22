@@ -16,7 +16,7 @@ const etat = {
   zoom: localStorage.getItem("zoom") || "largeur",
   echelle: 1,           // pixels CSS par point
   outil: "selection",
-  contenu: null,        // textes, mots, champs de la page affichée
+  contenus: {},         // textes, mots, champs de chaque page (chargés à la demande)
   edition: null,        // saisie en cours sur la page
   resultats: [], iRes: -1,
   config: {},
@@ -25,12 +25,29 @@ const etat = {
   signature: null,
   glisser: null,
 };
+// contenu de la page active (null s'il n'est pas encore chargé ou plus à jour)
+Object.defineProperty(etat, "contenu", {
+  get() { return contenuPage(etat.page); },
+});
+function contenuPage(i) {
+  const c = etat.contenus[i];
+  return c && etat.doc && c.version === etat.doc.version ? c : null;
+}
 
 // --------------------------------------------------------------------------
 // Utilitaires
 // --------------------------------------------------------------------------
 
-function statut(t) { $("#statut").textContent = t; }
+let minuterieStatut = null;
+/** Message bref, affiché en bas de l'écran puis masqué. */
+function statut(t) {
+  const s = $("#statut");
+  clearTimeout(minuterieStatut);
+  if (!t) { s.hidden = true; return; }
+  s.textContent = t;
+  s.hidden = false;
+  minuterieStatut = setTimeout(() => (s.hidden = true), Math.min(9000, 2500 + t.length * 45));
+}
 
 // Application installable (PWA) : le « serveur » est le moteur Python qui tourne dans le navigateur.
 const PWA = window.MOTEUR_PWA || null;
@@ -202,12 +219,19 @@ function nouveauDocument(infos) {
   etat.doc = infos;
   etat.page = Math.min(etat.page, infos.pages.length - 1);
   etat.resultats = [];
+  etat.contenus = {};
   $("#accueil").hidden = true;
-  $("#feuille").hidden = false;
+  $("#pages").innerHTML = "";
+  $("#pages").hidden = false;
+  $("#nom-document").textContent = infos.nom;
   document.title = `${infos.nom} — PDF Éditeur`;
+  // grand écran : panneau des outils ouvert, comme dans une liseuse PDF
+  if (innerWidth > 1100 && localStorage.getItem("outils") !== "ferme") $("#outils").hidden = false;
+  $("#vignettes").hidden = localStorage.getItem("vignettes") !== "ouvert" || innerWidth <= 760;
   construireVignettes();
   majEtat();
-  afficherPage();
+  afficherDocument();
+  $("#vue").scrollTop = 0;
 }
 
 function majDocument(infos, pagesTouchees = null) {
@@ -218,17 +242,21 @@ function majDocument(infos, pagesTouchees = null) {
   if (structure || pagesTouchees === "toutes") construireVignettes();
   else majVignettes(pagesTouchees ?? [etat.page]);
   majEtat();
-  return afficherPage();
+  return afficherDocument();
 }
 
 function majEtat() {
   const d = etat.doc;
   $("#b-annuler").disabled = !d || !d.annuler;
   $("#b-retablir").disabled = !d || !d.retablir;
-  $$("[data-doc], .outil[data-outil]").forEach((b) => (b.disabled = !d));
+  $$("[data-doc], .grille-outils button").forEach((b) => (b.disabled = !d));
   $("#p-total").textContent = `/ ${d ? d.pages.length : 0}`;
   $("#p-num").value = d ? etat.page + 1 : "";
-  $$(".outil[data-outil]").forEach((b) => b.classList.toggle("choisi", b.dataset.outil === etat.outil));
+  $$(".grille-outils [data-outil]").forEach((b) => b.classList.toggle("choisi", b.dataset.outil === etat.outil));
+  $("#b-modifier").hidden = etat.outil === "edition";
+  $("#b-outils").classList.toggle("actif", !$("#outils").hidden);
+  $("#b-pages").classList.toggle("actif", !$("#vignettes").hidden);
+  $$("[data-doc-visible]").forEach((g) => (g.style.visibility = d ? "visible" : "hidden"));
   majBandeau();
 }
 
@@ -248,38 +276,100 @@ function majBandeau() {
 }
 
 function calculerEchelle() {
-  const p = etat.doc.pages[etat.page], vue = $("#vue");
-  const largeur = vue.clientWidth - 48, hauteur = vue.clientHeight - 48;
-  if (etat.zoom === "largeur") return Math.max(0.2, largeur / p.l);
+  const vue = $("#vue"), pages = etat.doc.pages, p = pages[etat.page] || pages[0];
+  const largeur = vue.clientWidth - 48, hauteur = vue.clientHeight - 40;
+  const plusLarge = Math.max(...pages.map((q) => q.l));
+  if (etat.zoom === "largeur") return Math.max(0.2, Math.min(largeur / plusLarge, 2.2 * PT_EN_PX));
   if (etat.zoom === "page") return Math.max(0.2, Math.min(largeur / p.l, hauteur / p.h));
   return parseFloat(etat.zoom) * PT_EN_PX;
 }
 
-async function afficherPage() {
+const visibles = new Set(); // pages proches de l'écran
+const observateurPages = new IntersectionObserver((entrees) => {
+  for (const e of entrees) {
+    const i = +e.target.dataset.page;
+    if (e.isIntersecting) { visibles.add(i); rendrePage(i); } else visibles.delete(i);
+  }
+}, { root: $("#vue"), rootMargin: "800px 0px" });
+
+function feuille(i) { return document.querySelector(`.feuille[data-page="${i}"]`); }
+function calqueActif() { const f = feuille(etat.page); return f && f.querySelector(".calque"); }
+
+/** Toutes les pages, les unes sous les autres ; les images sont fabriquées à l'approche de l'écran. */
+async function afficherDocument() {
   if (!etat.doc) return;
   fermerEdition(true);
-  const p = etat.doc.pages[etat.page];
+  const vue = $("#vue"), conteneur = $("#pages");
+  const avant = feuille(etat.page);
+  const position = avant ? (vue.scrollTop - avant.offsetTop) / (avant.offsetHeight || 1) : 0;
+  const ancienne = etat.echelle;
   etat.echelle = calculerEchelle();
-  const f = $("#feuille");
-  f.style.width = `${p.l * etat.echelle}px`;
-  f.style.height = `${p.h * etat.echelle}px`;
+  if (conteneur.children.length !== etat.doc.pages.length) {
+    observateurPages.disconnect();
+    visibles.clear();
+    conteneur.innerHTML = "";
+    etat.doc.pages.forEach((_p, i) => {
+      const f = document.createElement("div");
+      f.className = "feuille";
+      f.dataset.page = i;
+      f.innerHTML = `<img class="image-page" alt="Page ${i + 1}" draggable="false"><div class="calque"></div>`;
+      conteneur.appendChild(f);
+    });
+  }
+  etat.doc.pages.forEach((p, i) => {
+    const f = conteneur.children[i];
+    f.style.width = `${p.l * etat.echelle}px`;
+    f.style.height = `${p.h * etat.echelle}px`;
+  });
+  for (const f of conteneur.children) { observateurPages.unobserve(f); observateurPages.observe(f); }
+  const apres = feuille(etat.page);
+  if (apres && ancienne !== etat.echelle) vue.scrollTop = apres.offsetTop + position * apres.offsetHeight;
+  await Promise.all([...visibles].map(rendrePage));
+  majIndicateur();
+}
+
+async function rendrePage(i) {
+  const f = feuille(i);
+  if (!f || !etat.doc) return;
+  const cle = `${etat.doc.version}|${etat.echelle.toFixed(3)}`;
+  if (f.dataset.rendu === cle) return;
+  f.dataset.rendu = cle;
   const resolution = etat.echelle * (window.devicePixelRatio || 1);
-  const img = $("#image-page");
-  afficherImage(img, urlDoc(`/page/${etat.page}.png?e=${resolution.toFixed(3)}&v=${etat.doc.version}`));
+  afficherImage(f.querySelector("img"), urlDoc(`/page/${i}.png?e=${resolution.toFixed(3)}&v=${etat.doc.version}`));
+  await chargerContenu(i);
+  dessinerCalque(i);
+}
+
+async function chargerContenu(i) {
+  const v = etat.doc.version;
+  if (contenuPage(i)) return contenuPage(i);
+  try {
+    const c = await api(urlDoc(`/page/${i}/contenu`));
+    if (!etat.doc || v !== etat.doc.version) return null;
+    c.version = v;
+    etat.contenus[i] = c;
+    return c;
+  } catch (e) { statut(e.message); return null; }
+}
+
+/** Page en cours = celle qui occupe le haut de l'écran (sauf pendant une saisie). */
+function suivreDefilement() {
+  if (!etat.doc || etat.edition || etat.glisser) return;
+  const vue = $("#vue"), repere = vue.scrollTop + vue.clientHeight * 0.3;
+  let n = 0;
+  for (const f of $("#pages").children) { if (f.offsetTop <= repere) n = +f.dataset.page; else break; }
+  if (n !== etat.page) { etat.page = n; majIndicateur(); }
+}
+
+function majIndicateur() {
+  if (!etat.doc) return;
   $("#p-num").value = etat.page + 1;
   $$(".vignette").forEach((v, i) => v.classList.toggle("active", i === etat.page));
   const v = $$(".vignette")[etat.page];
-  if (v) v.scrollIntoView({ block: "nearest" });
-  $("#calque").innerHTML = "";
-  etat.contenu = null;
-  const page = etat.page, version = etat.doc.version;
-  try {
-    const c = await api(urlDoc(`/page/${page}/contenu`));
-    if (page !== etat.page || version !== etat.doc.version) return;
-    etat.contenu = c;
-    dessinerCalque();
-  } catch (e) { statut(e.message); }
+  if (v && !$("#vignettes").hidden) v.scrollIntoView({ block: "nearest" });
 }
+
+function dessinerTout() { for (const f of $("#pages").children) dessinerCalque(+f.dataset.page); }
 
 function px(v) { return `${v * etat.echelle}px`; }
 
@@ -289,38 +379,45 @@ function placer(el, b) {
   return el;
 }
 
-function dessinerCalque() {
-  const calque = $("#calque");
+function dessinerCalque(i = etat.page) {
+  const f = feuille(i);
+  if (!f) return;
+  const calque = f.querySelector(".calque");
   calque.querySelectorAll(".boite, .champ, .resultat, .mot-sel").forEach((e) => e.remove());
-  calque.className = { edition: "edition", texte: "texte", image: "dessin", signature: "dessin", caviarder: "dessin", champ: "dessin" }[etat.outil] || "";
-  const c = etat.contenu;
-  if (!c) return;
-  if (etat.outil === "edition") {
-    for (const s of c.spans) calque.appendChild(placer(Object.assign(document.createElement("div"), { className: "boite" }), s.bbox));
+  calque.className = "calque " + ({ edition: "edition", texte: "texte", image: "dessin", signature: "dessin", caviarder: "dessin", champ: "dessin" }[etat.outil] || "");
+  const c = contenuPage(i);
+  if (c && etat.outil === "edition") {
+    for (const sp of c.spans) calque.appendChild(placer(Object.assign(document.createElement("div"), { className: "boite" }), sp.bbox));
   }
-  if (etat.outil === "formulaire" || etat.outil === "selection" || etat.outil === "champ") {
+  if (c && (etat.outil === "formulaire" || etat.outil === "selection" || etat.outil === "champ")) {
     for (const ch of c.champs) {
       const d = placer(document.createElement("div"), ch.bbox);
       d.className = "champ";
       d.title = ch.nom;
       if (etat.outil === "selection") d.style.background = "transparent", d.style.borderColor = "transparent";
-      d.addEventListener("pointerdown", (e) => { e.stopPropagation(); e.preventDefault(); remplirChamp(ch); });
+      d.addEventListener("pointerdown", (e) => {
+        e.stopPropagation(); e.preventDefault();
+        if (i !== etat.page) { fermerEdition(true); etat.page = i; majIndicateur(); }
+        remplirChamp(ch);
+      });
       calque.appendChild(d);
     }
   }
-  etat.resultats.forEach((r, i) => {
-    if (r.page !== etat.page) return;
+  etat.resultats.forEach((r, k) => {
+    if (r.page !== i) return;
     const d = placer(document.createElement("div"), r.bbox);
-    d.className = "resultat" + (i === etat.iRes ? " actif" : "");
+    d.className = "resultat" + (k === etat.iRes ? " actif" : "");
     calque.appendChild(d);
   });
 }
 
 function allerPage(n) {
-  if (!etat.doc || n < 0 || n >= etat.doc.pages.length || n === etat.page) return;
+  if (!etat.doc || n < 0 || n >= etat.doc.pages.length) return;
+  fermerEdition(true);
   etat.page = n;
-  afficherPage();
-  $("#vue").scrollTop = 0;
+  const f = feuille(n);
+  if (f) $("#vue").scrollTop = f.offsetTop - 12;
+  majIndicateur();
 }
 
 // --------------------------------------------------------------------------
@@ -398,7 +495,8 @@ async function actionPages(action, page, extra = {}) {
     const infos = await api(urlDoc("/pages"), { json: { action, page, ...extra } });
     if (action === "deplacer") etat.page = extra.vers;
     if (action === "blanche") etat.page = page + 1;
-    majDocument(infos, action === "pivoter" ? [page] : "toutes");
+    await majDocument(infos, action === "pivoter" ? [page] : "toutes");
+    allerPage(etat.page);
   });
 }
 
@@ -424,17 +522,26 @@ const AIDES = {
   champ: "Tracez un rectangle pour créer un champ de formulaire.",
 };
 
+const TITRES = {
+  edition: "Modifier le texte", texte: "Ajouter du texte", image: "Ajouter une image", signature: "Signer",
+  surligner: "Surligner", note: "Ajouter une note", formulaire: "Remplir le formulaire",
+  caviarder: "Effacer une zone", champ: "Créer un champ de formulaire",
+};
+
 function choisirOutil(o) {
   fermerEdition(true);
   etat.outil = o;
   $("#format").hidden = !(o === "edition" || o === "texte");
+  $("#barre-contexte").hidden = o === "selection";
+  $("#contexte-titre").textContent = TITRES[o] || "";
+  $("#contexte-aide").textContent = AIDES[o] || "";
+  if (innerWidth <= 760) { $("#outils").hidden = true; if (o !== "selection") statut(AIDES[o] || ""); }
   majEtat();
-  dessinerCalque();
-  statut(AIDES[o] || "");
+  dessinerTout();
 }
 
 function pointPt(e) {
-  const r = $("#calque").getBoundingClientRect();
+  const r = calqueActif().getBoundingClientRect();
   return [(e.clientX - r.left) / etat.echelle, (e.clientY - r.top) / etat.echelle];
 }
 
@@ -452,21 +559,27 @@ function motsDans(a, b) {
 }
 
 function montrerSelection(mots) {
-  $$("#calque .mot-sel").forEach((e) => e.remove());
-  for (const m of mots) $("#calque").appendChild(Object.assign(placer(document.createElement("div"), m), { className: "mot-sel" }));
+  $$(".mot-sel").forEach((e) => e.remove());
+  for (const m of mots) calqueActif().appendChild(Object.assign(placer(document.createElement("div"), m), { className: "mot-sel" }));
 }
 
 function cadre(a, b, danger = false) {
-  let d = $("#calque .cadre");
-  if (!d) { d = document.createElement("div"); $("#calque").appendChild(d); }
+  let d = calqueActif().querySelector(".cadre");
+  if (!d) { d = document.createElement("div"); calqueActif().appendChild(d); }
   d.className = "cadre" + (danger ? " danger" : "");
   placer(d, [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[0], b[0]), Math.max(a[1], b[1])]);
 }
 
-const calque = $("#calque");
-calque.addEventListener("pointerdown", (e) => {
-  if (!etat.doc || e.button !== 0 || e.target.closest(".saisie")) return;
+// Souris et doigt sur les pages : un seul écouteur pour toutes les pages
+const zonePages = $("#pages");
+function pageDe(e) { const c = e.target.closest(".calque"); return c ? +c.parentElement.dataset.page : null; }
+
+zonePages.addEventListener("pointerdown", (e) => {
+  const i = pageDe(e);
+  if (i === null || !etat.doc || e.button !== 0 || e.target.closest(".saisie")) return;
   e.preventDefault(); // sinon le navigateur retire le focus de la zone de saisie qu'on va ouvrir
+  if (i !== etat.page) { fermerEdition(true); etat.page = i; majIndicateur(); }
+  const calque = calqueActif();
   const [x, y] = pointPt(e);
   const o = etat.outil;
   if (etat.edition) { fermerEdition(true); if (o === "texte") return; }
@@ -483,18 +596,18 @@ calque.addEventListener("pointerdown", (e) => {
   if (o === "selection" || o === "surligner") montrerSelection(motsDans([x, y], [x, y]));
 });
 
-calque.addEventListener("pointermove", (e) => {
+zonePages.addEventListener("pointermove", (e) => {
   if (!etat.glisser) return;
   const p = pointPt(e), o = etat.outil;
   if (o === "selection" || o === "surligner") montrerSelection(motsDans(etat.glisser, p));
   else if (["image", "signature", "caviarder", "champ"].includes(o)) cadre(etat.glisser, p, o === "caviarder");
 });
 
-calque.addEventListener("pointerup", (e) => {
+zonePages.addEventListener("pointerup", (e) => {
   if (!etat.glisser) return;
   const a = etat.glisser, b = pointPt(e), o = etat.outil;
   etat.glisser = null;
-  $("#calque .cadre")?.remove();
+  $$(".cadre").forEach((c) => c.remove());
   if (o === "selection") return infosSelection(motsDans(a, b));
   if (o === "surligner") return surligner(motsDans(a, b));
   if (["image", "signature", "caviarder", "champ"].includes(o)) {
@@ -504,8 +617,8 @@ calque.addEventListener("pointerup", (e) => {
   }
 });
 
-calque.addEventListener("dblclick", (e) => {
-  if (etat.outil !== "selection") return;
+zonePages.addEventListener("dblclick", (e) => {
+  if (etat.outil !== "selection" || pageDe(e) === null) return;
   const [x, y] = pointPt(e);
   const s = spanA(x, y);
   if (s) { choisirOutil("edition"); ouvrirEdition(spanA(x, y)); }
@@ -578,14 +691,14 @@ async function ouvrirEdition(s) {
   el.style.width = `${Math.max((s.bbox[2] - s.bbox[0]) * etat.echelle + 60, 160)}px`;
   el.style.background = fond;
   styleSaisie(el, format);
-  $("#calque").appendChild(el);
+  calqueActif().appendChild(el);
   el.focus();
   el.setSelectionRange(el.value.length, el.value.length);
   el.addEventListener("keydown", (e) => {
     if (e.key === "Enter") { e.preventDefault(); fermerEdition(true); }
     if (e.key === "Escape") { e.preventDefault(); fermerEdition(false); }
   });
-  etat.edition = { type: "modif", span: s, el, texte: s.texte, format: formatCourant() };
+  etat.edition = { type: "modif", span: s, el, texte: s.texte, format: formatCourant(), page: etat.page };
 }
 
 function ouvrirAjout(x, y) {
@@ -596,14 +709,14 @@ function ouvrirAjout(x, y) {
   el.style.left = px(x); el.style.top = px(y);
   el.style.width = "300px";
   styleSaisie(el, f);
-  $("#calque").appendChild(el);
+  calqueActif().appendChild(el);
   el.focus();
   el.addEventListener("keydown", (e) => {
     if (e.key === "Enter") { e.preventDefault(); fermerEdition(true); }
     if (e.key === "Escape") { e.preventDefault(); fermerEdition(false); }
   });
   $("#f-origine").textContent = "";
-  etat.edition = { type: "ajout", x, y, el };
+  etat.edition = { type: "ajout", x, y, el, page: etat.page };
 }
 
 function fermerEdition(valider) {
@@ -617,7 +730,7 @@ function fermerEdition(valider) {
   if (ed.type === "ajout") {
     if (!valeur.trim()) return;
     essayer(async () => {
-      const infos = await api(urlDoc("/ajouter_texte"), { json: { page: etat.page, x: ed.x, y: ed.y, texte: valeur, style: formatCourant() } });
+      const infos = await api(urlDoc("/ajouter_texte"), { json: { page: ed.page, x: ed.x, y: ed.y, texte: valeur, style: formatCourant() } });
       majDocument(infos);
       statut(`Texte ajouté : « ${valeur} »`);
     });
@@ -637,7 +750,7 @@ function fermerEdition(valider) {
   }
   essayer(async () => {
     const infos = await api(urlDoc("/modifier_texte"), {
-      json: { page: etat.page, bbox: s.bbox, texte: valeur, style, scan: s.scan, decaler: $("#f-decaler").checked },
+      json: { page: ed.page, bbox: s.bbox, texte: valeur, style, scan: s.scan, decaler: $("#f-decaler").checked },
     }, "Modification…");
     majDocument(infos);
     const r = infos.resultat;
@@ -770,7 +883,7 @@ async function remplirChamp(ch) {
     sel.className = "saisie";
     sel.innerHTML = ch.choix.map((c) => `<option ${c === ch.valeur ? "selected" : ""}>${echapper(c)}</option>`).join("");
     placer(sel, ch.bbox);
-    $("#calque").appendChild(sel);
+    calqueActif().appendChild(sel);
     sel.focus();
     if (sel.showPicker) try { sel.showPicker(); } catch (_) { /* navigateur sans showPicker */ }
     const fin = () => { if (sel.isConnected) { sel.remove(); etat.edition = null; if (sel.value !== ch.valeur) envoyerChamp(ch, sel.value); } };
@@ -786,7 +899,7 @@ async function remplirChamp(ch) {
   placer(el, ch.bbox);
   el.style.fontSize = `${(ch.taille || Math.max(8, Math.min(14, (ch.bbox[3] - ch.bbox[1]) * 0.65))) * etat.echelle}px`;
   el.style.fontFamily = "Arial, Helvetica, sans-serif";
-  $("#calque").appendChild(el);
+  calqueActif().appendChild(el);
   el.focus();
   const valider = async (valeur, sens = 0) => {
     if (valeur !== (ch.valeur || "")) await envoyerChamp(ch, valeur);
@@ -833,7 +946,7 @@ async function rechercher() {
     etat.resultats = res;
     etat.iRes = -1;
     $("#r-resultats").textContent = res.length ? `${res.length} résultat(s)` : "Aucun résultat";
-    if (res.length) resultatSuivant(1); else dessinerCalque();
+    if (res.length) resultatSuivant(1); else dessinerTout();
   });
 }
 
@@ -843,13 +956,17 @@ function resultatSuivant(sens) {
   etat.iRes = (etat.iRes + sens + n) % n;
   const r = etat.resultats[etat.iRes];
   $("#r-resultats").textContent = `Résultat ${etat.iRes + 1} sur ${n}`;
-  if (r.page !== etat.page) { etat.page = r.page; afficherPage().then(() => defilerVers(r)); }
-  else { dessinerCalque(); defilerVers(r); }
+  etat.page = r.page;
+  dessinerTout();
+  defilerVers(r);
 }
 
 function defilerVers(r) {
-  const vue = $("#vue"), y = r.bbox[1] * etat.echelle + $("#feuille").offsetTop;
-  if (y < vue.scrollTop || y > vue.scrollTop + vue.clientHeight - 40) vue.scrollTop = y - 120;
+  const f = feuille(r.page);
+  if (!f) return;
+  const vue = $("#vue"), y = f.offsetTop + r.bbox[1] * etat.echelle;
+  if (y < vue.scrollTop + 40 || y > vue.scrollTop + vue.clientHeight - 60) vue.scrollTop = y - vue.clientHeight / 3;
+  majIndicateur();
 }
 
 async function remplacerTout() {
@@ -1001,7 +1118,9 @@ const ACTIONS = {
     if (!etat.doc || !(await confirmerAbandon())) return;
     transport(urlDoc(), { method: "DELETE" });
     etat.doc = null; etat.modifie = false;
-    $("#feuille").hidden = true; $("#vignettes").innerHTML = ""; $("#accueil").hidden = false; $("#bandeau").hidden = true;
+    $("#pages").hidden = true; $("#pages").innerHTML = ""; $("#vignettes").innerHTML = ""; $("#vignettes").hidden = true;
+    $("#outils").hidden = true; $("#panneau").hidden = true; $("#accueil").hidden = false; $("#bandeau").hidden = true;
+    $("#barre-contexte").hidden = true; etat.outil = "selection"; $("#nom-document").textContent = "PDF Éditeur";
     document.title = "PDF Éditeur";
     majEtat();
   },
@@ -1017,7 +1136,30 @@ const ACTIONS = {
   retablir: () => etat.doc && essayer(async () => { fermerEdition(false); majDocument(await api(urlDoc("/retablir"), { method: "POST" }), "toutes"); }),
   image: () => $("#f-image").click(),
   signer: async () => { const s = await demanderSignature(); if (s) { etat.signature = s; choisirOutil("signature"); } },
-  rechercher: () => { $("#panneau").hidden = false; $("#r-cherche").focus(); $("#r-cherche").select(); },
+  rechercher: () => {
+    $("#outils").hidden = true;
+    $("#panneau").hidden = false;
+    majEtat();
+    $("#r-cherche").focus(); $("#r-cherche").select();
+  },
+  outils: () => {
+    const ouvrir = $("#outils").hidden;
+    $("#outils").hidden = !ouvrir;
+    if (ouvrir) $("#panneau").hidden = true;
+    localStorage.setItem("outils", ouvrir ? "ouvert" : "ferme");
+    majEtat();
+    if (etat.zoom === "largeur") afficherDocument();
+  },
+  "panneau-pages": () => {
+    const ouvrir = $("#vignettes").hidden;
+    $("#vignettes").hidden = !ouvrir;
+    localStorage.setItem("vignettes", ouvrir ? "ouvert" : "ferme");
+    majEtat();
+    majIndicateur();
+    if (etat.zoom === "largeur") afficherDocument();
+  },
+  "zoom-plus": () => changerZoom(1),
+  "zoom-moins": () => changerZoom(-1),
   pivoter: () => actionPages("pivoter", etat.page, { angle: 90 }),
   "pivoter-tout": () => actionPages("pivoter_tout", etat.page),
   "supprimer-page": () => supprimerPage(),
@@ -1064,7 +1206,7 @@ document.addEventListener("click", (e) => {
   }
   const b = e.target.closest("[data-action], [data-outil]");
   if (!e.target.closest(".menu") || b) fermerMenus();
-  if (!b || b.disabled || b.closest("#calque")) return;
+  if (!b || b.disabled || b.closest(".calque")) return;
   if (b.dataset.outil) {
     if (!etat.doc) return;
     return choisirOutil(b.dataset.outil);
@@ -1127,7 +1269,7 @@ $("#r-cherche").addEventListener("keydown", (e) => { if (e.key === "Enter") rech
 $("#r-prec").addEventListener("click", () => resultatSuivant(-1));
 $("#r-suiv").addEventListener("click", () => resultatSuivant(1));
 $("#r-remplacer").addEventListener("click", remplacerTout);
-$("#panneau-fermer").addEventListener("click", () => { $("#panneau").hidden = true; etat.resultats = []; dessinerCalque(); });
+$("#panneau-fermer").addEventListener("click", () => { $("#panneau").hidden = true; etat.resultats = []; dessinerTout(); });
 $("#bandeau-fermer").addEventListener("click", () => { etat.bandeauFerme = true; $("#bandeau").hidden = true; });
 
 // navigation et zoom
@@ -1135,27 +1277,33 @@ $("#p-prec").addEventListener("click", () => allerPage(etat.page - 1));
 $("#p-suiv").addEventListener("click", () => allerPage(etat.page + 1));
 $("#p-num").addEventListener("change", (e) => { allerPage(parseInt(e.target.value, 10) - 1); majEtat(); });
 $("#zoom").value = etat.zoom;
-$("#zoom").addEventListener("change", (e) => { etat.zoom = e.target.value; localStorage.setItem("zoom", etat.zoom); afficherPage(); });
+$("#zoom").addEventListener("change", (e) => { etat.zoom = e.target.value; localStorage.setItem("zoom", etat.zoom); afficherDocument(); });
+
+function changerZoom(sens) {
+  if (!etat.doc) return;
+  const niveaux = [0.5, 0.75, 1, 1.25, 1.5, 2, 3];
+  const actuel = etat.echelle / PT_EN_PX;
+  const z = sens > 0 ? niveaux.find((n) => n > actuel + 0.01) : [...niveaux].reverse().find((n) => n < actuel - 0.01);
+  if (!z) return;
+  etat.zoom = String(z);
+  $("#zoom").value = etat.zoom;
+  afficherDocument();
+}
+
+let attenteDefilement = null;
+$("#vue").addEventListener("scroll", () => {
+  if (attenteDefilement) return;
+  attenteDefilement = requestAnimationFrame(() => { attenteDefilement = null; suivreDefilement(); });
+});
 let attenteRedim;
 window.addEventListener("resize", () => {
   clearTimeout(attenteRedim);
-  if (etat.doc && !etat.edition && (etat.zoom === "largeur" || etat.zoom === "page")) attenteRedim = setTimeout(afficherPage, 200);
+  if (etat.doc && !etat.edition && (etat.zoom === "largeur" || etat.zoom === "page")) attenteRedim = setTimeout(afficherDocument, 200);
 });
 $("#vue").addEventListener("wheel", (e) => {
-  if (e.ctrlKey) {
-    e.preventDefault();
-    const niveaux = [0.5, 0.75, 1, 1.25, 1.5, 2, 3];
-    const actuel = etat.echelle / PT_EN_PX;
-    const z = e.deltaY < 0 ? niveaux.find((n) => n > actuel + 0.01) : [...niveaux].reverse().find((n) => n < actuel - 0.01);
-    if (z) { etat.zoom = String(z); $("#zoom").value = etat.zoom; afficherPage(); }
-    return;
-  }
-  const vue = $("#vue");
-  if (e.deltaY > 0 && vue.scrollTop + vue.clientHeight >= vue.scrollHeight - 2 && etat.doc && etat.page < etat.doc.pages.length - 1) {
-    e.preventDefault(); allerPage(etat.page + 1);
-  } else if (e.deltaY < 0 && vue.scrollTop <= 0 && etat.page > 0) {
-    e.preventDefault(); etat.page--; afficherPage().then(() => (vue.scrollTop = vue.scrollHeight));
-  }
+  if (!e.ctrlKey) return; // défilement normal : les pages défilent en continu
+  e.preventDefault();
+  changerZoom(e.deltaY < 0 ? 1 : -1);
 }, { passive: false });
 
 // raccourcis clavier
@@ -1202,7 +1350,6 @@ async function montrerLienTelephone() {
   try { etat.config = await api("/api/config"); } catch (_) { etat.config = {}; }
   if (!etat.config.scanner) $$("[data-local]").forEach((b) => (b.hidden = true));
   if (!matchMedia("(pointer: coarse)").matches) $$('[data-action="photo"]').forEach((b) => b.textContent.startsWith("Photo") && (b.textContent = "Ouvrir une photo…"));
-  document.documentElement.style.setProperty("--haut-accueil", `${$("#ruban").offsetHeight}px`);
   chargerPolices();
   setTimeout(chargerPolices, 8000); // la liste complète peut être prête un peu plus tard
   majEtat();

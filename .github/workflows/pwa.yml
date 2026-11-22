@@ -33,10 +33,8 @@ jobs:
       - name: Construire la PWA
         run: python pwa/construire.py
 
-      - name: Activer GitHub Pages
-        uses: actions/configure-pages@v5
-        with:
-          enablement: true
+      # GitHub Pages doit avoir été activé une fois : Settings > Pages > Source : « GitHub Actions »
+      - uses: actions/configure-pages@v5
 
       - uses: actions/upload-pages-artifact@v3
         with:
